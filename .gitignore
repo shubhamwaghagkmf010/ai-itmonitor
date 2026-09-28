@@ -1,0 +1,37 @@
+# Secrets
+backend/.env
+.env
+*.pem
+*.key
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+# Logs & runtime
+*.log
+agent/agent_config.json
+
+# Compiled agents / binaries
+*.exe
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Backups
+*-bak
+*.bak
+
+# Caches & build artifacts
+backend/app/services/oui_cache.csv
+*.zip
+backend/agent_dist/
+node_modules/

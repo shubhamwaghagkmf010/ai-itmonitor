@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Device — IT Asset Registration</title>
+<style>
+  :root{--bg:#0b0f19;--card:#131d31;--card2:#0f172a;--line:#1e293b;--ink:#e6ecf3;--muted:#94a3b8;--teal:#14b8a6;--teal2:#0d9488;}
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(160deg,#0b0f19,#0e1626);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:24px 16px}
+  .wrap{width:100%;max-width:720px}
+  .head{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+  .logo{width:40px;height:40px;border-radius:10px;background:var(--teal);display:grid;place-items:center;font-weight:800;color:#04211d;font-size:18px}
+  h1{font-size:20px;margin:0}
+  .sub{color:var(--muted);font-size:13px;margin-top:2px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 12px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
+  @media(max-width:520px){.grid{grid-template-columns:1fr}}
+  .ro{display:flex;flex-direction:column;gap:2px}
+  .ro .k{font-size:11px;color:var(--muted)}
+  .ro .v{font-size:14px;font-weight:600;word-break:break-word}
+  label{display:block;font-size:12px;color:var(--muted);margin:0 0 5px}
+  .req{color:#fb7185}
+  input{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:10px 12px;color:var(--ink);font-size:14px}
+  input:focus{outline:none;border-color:var(--teal)}
+  .field{margin-bottom:14px}
+  button{width:100%;background:var(--teal);color:#04211d;border:none;border-radius:10px;padding:12px;font-size:15px;font-weight:700;cursor:pointer}
+  button:hover{background:var(--teal2);color:#fff}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .msg{padding:11px 13px;border-radius:9px;font-size:13px;margin-bottom:14px;display:none}
+  .msg.ok{display:block;background:#0e2a20;border:1px solid #245c47;color:#9df0c8}
+  .msg.err{display:block;background:#2a1615;border:1px solid #5c2c2a;color:#f2b3b1}
+  .msg.info{display:block;background:#12242f;border:1px solid #2a4d60;color:#a9d8ee}
+  .foot{text-align:center;color:#64748b;font-size:11px;margin-top:6px}
+  .badge{display:inline-block;background:#0e2a20;border:1px solid #245c47;color:#6ee7b7;font-size:11px;padding:2px 8px;border-radius:999px;margin-left:8px}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div class="logo">IT</div>
+      <div>
+        <h1>My Device Registration</h1>
+        <div class="sub">Confirm your details for the IT asset register. Your device is detected automatically.</div>
+      </div>
+    </div>
+
+    <div id="msg" class="msg"></div>
+
+    <div class="card">
+      <h2>Detected Device <span id="ipbadge" class="badge"></span></h2>
+      <div class="grid" id="devinfo">
+        <div class="ro"><span class="k">Host Name</span><span class="v" id="d_host">…</span></div>
+        <div class="ro"><span class="k">Make / Model</span><span class="v" id="d_makemodel">…</span></div>
+        <div class="ro"><span class="k">Serial No</span><span class="v" id="d_serial">…</span></div>
+        <div class="ro"><span class="k">Processor</span><span class="v" id="d_cpu">…</span></div>
+        <div class="ro"><span class="k">RAM</span><span class="v" id="d_ram">…</span></div>
+        <div class="ro"><span class="k">OS</span><span class="v" id="d_os">…</span></div>
+      </div>
+    </div>
+
+    <form class="card" id="form">
+      <h2>Your Details</h2>
+      <div class="grid">
+        <div class="field"><label>Owned By Employee ID <span class="req">*</span></label><input id="owned_by_emp_id" required></div>
+        <div class="field"><label>Owned By Employee Name <span class="req">*</span></label><input id="owned_by_emp_name" required></div>
+        <div class="field"><label>Work Station Number <span class="req">*</span></label><input id="workstation_number" required></div>
+        <div class="field"><label>Purpose of Allocation</label><input id="allocation_purpose"></div>
+      </div>
+      <button type="submit" id="submitBtn">Save My Details</button>
+    </form>
+
+    <div class="foot">AI-ITMonitor · Asset Self-Service</div>
+  </div>
+
+<script>
+  var API = "/api/v1/assets/self";
+  function setMsg(kind, text){ var m=document.getElementById('msg'); m.className='msg '+kind; m.textContent=text; }
+  function val(id){ return (document.getElementById(id).value||'').trim(); }
+
+  fetch(API).then(function(r){return r.json();}).then(function(d){
+    document.getElementById('ipbadge').textContent = d.detected_ip || '';
+    document.getElementById('d_host').textContent = d.host_name || '—';
+    document.getElementById('d_makemodel').textContent = ((d.make||'—')+' / '+(d.model||'—'));
+    document.getElementById('d_serial').textContent = d.serial_no || '—';
+    document.getElementById('d_cpu').textContent = d.processor_type || '—';
+    document.getElementById('d_ram').textContent = d.ram || '—';
+    document.getElementById('d_os').textContent = d.os_version || '—';
+    document.getElementById('owned_by_emp_id').value = d.owned_by_emp_id || '';
+    document.getElementById('owned_by_emp_name').value = d.owned_by_emp_name || '';
+    document.getElementById('workstation_number').value = d.workstation_number || '';
+    document.getElementById('allocation_purpose').value = d.allocation_purpose || '';
+    if(!d.found){ setMsg('info','We could not match your device automatically, but you can still submit your details and IT will link them.'); }
+  }).catch(function(){ setMsg('err','Could not reach the server. Please try again or contact IT.'); });
+
+  document.getElementById('form').addEventListener('submit', function(e){
+    e.preventDefault();
+    var btn=document.getElementById('submitBtn'); btn.disabled=true; btn.textContent='Saving…';
+    fetch(API, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+      owned_by_emp_id: val('owned_by_emp_id'),
+      owned_by_emp_name: val('owned_by_emp_name'),
+      workstation_number: val('workstation_number'),
+      allocation_purpose: val('allocation_purpose')
+    })}).then(function(r){return r.json();}).then(function(){
+      setMsg('ok','Thank you! Your details have been saved.'); btn.disabled=false; btn.textContent='Save My Details';
+      window.scrollTo(0,0);
+    }).catch(function(){ setMsg('err','Save failed. Please try again.'); btn.disabled=false; btn.textContent='Save My Details'; });
+  });
+</script>
+</body>
+</html>

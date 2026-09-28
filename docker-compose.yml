@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_itmonitor_db
+    restart: always
+    environment:
+      POSTGRES_USER: ai_itmonitor_user
+      POSTGRES_PASSWORD: ai_itmonitor_password
+      POSTGRES_DB: ai_itmonitor_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: ai_itmonitor_backend
+    restart: always
+    environment:
+      POSTGRES_SERVER: postgres
+      POSTGRES_USER: ai_itmonitor_user
+      POSTGRES_PASSWORD: ai_itmonitor_password
+      POSTGRES_DB: ai_itmonitor_db
+      POSTGRES_PORT: 5432
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      OLLAMA_MODEL: "qwen2.5:0.5b"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: ai_itmonitor_frontend
+    restart: always
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
