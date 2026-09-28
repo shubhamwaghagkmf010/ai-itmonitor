@@ -1,5 +1,6 @@
 import re
 import socket
+import subprocess
 import ipaddress
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,45 @@ from backend.app.api.deps import require_permission, record_audit_event
 router = APIRouter()
 
 MAC_REGEX = re.compile(r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$')
+
+def _server_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def _same_subnet(a: str, b: str) -> bool:
+    try:
+        na = ipaddress.IPv4Network(f"{a}/24", strict=False).network_address
+        nb = ipaddress.IPv4Network(f"{b}/24", strict=False).network_address
+        return na == nb
+    except Exception:
+        return True
+
+
+def _ping_ok(ip: str) -> bool:
+    try:
+        return subprocess.run(["ping", "-c", "1", "-W", "1", ip],
+                              capture_output=True, timeout=2).returncode == 0
+    except Exception:
+        return False
+
+
+def _tcp_open(ip: str, port: int, timeout: float = 1.0) -> bool:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        rc = s.connect_ex((ip, port))
+        s.close()
+        return rc == 0
+    except Exception:
+        return False
+
 
 def build_magic_packet(mac_address: str) -> bytes:
     clean_mac = mac_address.replace(":", "").replace("-", "").strip()
@@ -49,7 +89,12 @@ def execute_hardened_wol_with_relays(db: Session, target_mac: str, target_ip: st
                     except Exception:
                         pass
             time.sleep(0.04)
-    dispatch_logs.append(f"[Server Direct] Dispatched 3-Burst to {subnet_bcast} & {target_ip}")
+    server_ip = _server_ip()
+    cross = bool(target_ip) and bool(server_ip) and not _same_subnet(server_ip, target_ip)
+    dispatch_logs.append(f"[Target] {target_ip}  MAC {target_mac}  subnet-broadcast {subnet_bcast}")
+    dispatch_logs.append(f"[Server] {server_ip}  -> sent magic packet x3 to {', '.join(targets)} on UDP 7 & 9")
+    if cross:
+        dispatch_logs.append("[WARN] Target is on a DIFFERENT subnet than the server. A broadcast usually does NOT cross a router, so this wake depends on a peer-relay agent on the target subnet (below) or router directed-broadcast.")
 
     # 2. Automated Peer-Relay: Find any active online node on same subnet
     try:
@@ -77,10 +122,13 @@ def execute_hardened_wol_with_relays(db: Session, target_mac: str, target_ip: st
                     # Send UDP Relay Wake trigger to port 9999 on peer
                     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as r_sock:
                         r_sock.sendto(target_mac.encode('utf-8'), (peer.ip_address, 9999))
-                    dispatch_logs.append(f"[Peer-Relay] Triggered active agent on {peer.hostname} ({peer.ip_address})")
+                    dispatch_logs.append(f"[Peer-Relay] Asked online agent on {peer.hostname} ({peer.ip_address}) to broadcast locally")
                     relays_triggered += 1
             except Exception:
                 pass
+        if relays_triggered == 0:
+            dispatch_logs.append("[Peer-Relay] No online agent on the target subnet to relay through."
+                                 + (" This is required for cross-subnet wake." if cross else ""))
     except Exception as ex:
         dispatch_logs.append(f"[Peer-Relay Notice] {ex}")
 
@@ -208,3 +256,34 @@ def wake_machine(
         "boot_status": "BOOTING",
         "logs": dispatch_logs
     }
+
+
+@router.get("/status/{machine_id}")
+def wol_status(machine_id: int, db: Session = Depends(get_db),
+               current_user: User = Depends(require_permission("wol.view"))):
+    """Live boot status of a target: agent heartbeat, or ICMP ping, or an open TCP port.
+    Lets the UI show what stage the machine is actually at after a wake."""
+    m = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not m:
+        raise HTTPException(status_code=404, detail="Target device not found")
+
+    now = datetime.now(timezone.utc)
+    hb = False
+    if m.last_heartbeat:
+        hb_utc = m.last_heartbeat if m.last_heartbeat.tzinfo else m.last_heartbeat.replace(tzinfo=timezone.utc)
+        hb = (now - hb_utc).total_seconds() < 30
+
+    ip = m.ip_address if (m.ip_address and m.ip_address not in ("Unknown", "127.0.0.1")) else ""
+    ping = _ping_ok(ip) if ip else False
+    tcp_port = 0
+    if ip and not (hb or ping):
+        for port in (3389, 445, 139, 135, 22):
+            if _tcp_open(ip, port):
+                tcp_port = port
+                break
+
+    online = bool(hb or ping or tcp_port)
+    signal = "agent" if hb else ("ping" if ping else (f"tcp:{tcp_port}" if tcp_port else "none"))
+    return {"machine_id": machine_id, "hostname": m.hostname, "ip": ip or None,
+            "online": online, "signal": signal,
+            "stage": "ONLINE" if online else "OFFLINE"}

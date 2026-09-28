@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import httpx
+import socket
+import threading
 from pathlib import Path
 
 # Add project root to sys.path
@@ -53,7 +55,49 @@ def register_agent(client: httpx.Client) -> str:
         return None
 
 
+
+
+def _start_wol_relay():
+    """Listen on UDP 9999 for a MAC address; broadcast the Wake-on-LAN magic packet on THIS
+    machine's local subnet. Lets the server wake a PC on a subnet it cannot broadcast to,
+    by relaying through an always-on agent that shares the PC's subnet."""
+    def _magic(mac):
+        clean = mac.replace(":", "").replace("-", "").strip()
+        return b"\xff" * 6 + bytes.fromhex(clean) * 16
+
+    def _listen():
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("0.0.0.0", 9999))
+        except Exception as e:
+            print(f"[relay] could not bind udp/9999: {e}")
+            return
+        caster = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        caster.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        print("[relay] Wake-on-LAN relay listening on udp/9999")
+        while True:
+            try:
+                data, _addr = srv.recvfrom(1024)
+                mac = data.decode("utf-8", "ignore").strip()
+                if len(mac.replace(":", "").replace("-", "")) == 12:
+                    pkt = _magic(mac)
+                    for _ in range(3):
+                        for port in (7, 9):
+                            try:
+                                caster.sendto(pkt, ("255.255.255.255", port))
+                            except Exception:
+                                pass
+                        time.sleep(0.04)
+                    print(f"[relay] broadcast magic packet locally for {mac}")
+            except Exception as e:
+                print(f"[relay] error: {e}")
+                time.sleep(1)
+
+    threading.Thread(target=_listen, daemon=True).start()
+
 def run_agent():
+    _start_wol_relay()
     print("==================================================")
     print("      AI-ITMonitor Cross-Platform Agent           ")
     print("==================================================")

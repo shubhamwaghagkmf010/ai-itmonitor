@@ -404,6 +404,32 @@ export default function App() {
     }
   };
 
+  const pollWakeStatus = (target) => {
+    const stepMs = 5000, maxMs = 150000;
+    let elapsed = 0;
+    const tick = async () => {
+      try {
+        const r = await axios.get(`${API_BASE}/wol/status/${target.id}`, { headers: { Authorization: `Bearer ${token}` } });
+        const t = new Date().toLocaleTimeString();
+        if (r.data.online) {
+          setWolConsoleLogs((prev) => [...prev, `[${t}] [STATUS] \u2705 ${target.hostname} is UP! (detected via ${r.data.signal})`]);
+          showToast(`\u2705 ${target.hostname} is now ONLINE`);
+          fetchData();
+          return;
+        }
+        setWolConsoleLogs((prev) => [...prev, `[${t}] [STATUS] Waiting for boot... still offline (${Math.round(elapsed / 1000)}s elapsed)`]);
+      } catch (e) { /* keep polling */ }
+      elapsed += stepMs;
+      if (elapsed < maxMs) {
+        setTimeout(tick, stepMs);
+      } else {
+        const t = new Date().toLocaleTimeString();
+        setWolConsoleLogs((prev) => [...prev, `[${t}] [STATUS] \u26a0\ufe0f ${target.hostname} did not come online after ${Math.round(maxMs / 1000)}s. Likely causes: WoL not armed on the PC (BIOS ErP/Deep-Sleep, Windows Fast Startup, or NIC "wake on magic packet") \u2014 or the packet did not reach a different subnet. See the WoL checklist.`]);
+      }
+    };
+    setTimeout(tick, stepMs);
+  };
+
   const handleExecuteWolCommand = async () => {
     if (!hasPerm('wol.execute')) {
       alert("Unauthorized: Missing 'wol.execute' permission.");
@@ -440,9 +466,11 @@ export default function App() {
           `[${completionTime}] [STEP 5] [+] Magic Packet payload successfully blasted! State changed to 'BOOTING'...`,
           `[${completionTime}] [OUTPUT] ${res.data.message || 'Magic Packet dispatched successfully.'}`
         ]);
+        setWolConsoleLogs((prev) => [...prev, `[${completionTime}] [STEP 6] Monitoring real boot status (ping / TCP / agent) for up to 2.5 min...`]);
         setIsExecutingWol(false);
-        showToast(`⚡ Multi-Engine Wake Signal blasted to ${selectedWolTarget.hostname}!`);
+        showToast(`⚡ Wake signal sent to ${selectedWolTarget.hostname} — watching boot status...`);
         fetchData();
+        pollWakeStatus(selectedWolTarget);
       }, 600);
 
     } catch (err) {
