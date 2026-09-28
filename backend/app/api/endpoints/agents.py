@@ -61,6 +61,7 @@ class IngestMetricsPayload(BaseModel):
     sensors: Optional[Any] = None
     disks_smart: Optional[Any] = None
     gpu: Optional[Any] = None
+    drives: Optional[Any] = None
 
 class RemoteActionPayload(BaseModel):
     command_type: str
@@ -119,6 +120,8 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
     machine.last_heartbeat = now
     machine.logged_in_user = payload.logged_in_user or machine.logged_in_user
     machine.status = MachineStatus.HEALTHY
+    if payload.drives is not None:
+        machine.drives = payload.drives
 
     metric = MachineMetric(
         machine_id=machine.id,
@@ -209,7 +212,7 @@ def get_metrics(machine_id: int, limit: int = 20, db: Session = Depends(get_db),
         MachineMetric.machine_id == machine_id
     ).order_by(MachineMetric.timestamp.desc()).limit(limit).all()
     metrics.reverse()
-    return [
+    rows = [
         {
             "id": m.id,
             "timestamp": m.timestamp.strftime("%H:%M:%S"),
@@ -223,6 +226,10 @@ def get_metrics(machine_id: int, limit: int = 20, db: Session = Depends(get_db),
         }
         for m in metrics
     ]
+    if rows:
+        machine = db.query(Machine).filter(Machine.id == machine_id).first()
+        rows[-1]["drives"] = machine.drives if (machine and machine.drives) else None
+    return rows
 
 @router.get("/machines/{machine_id}/processes")
 def get_processes(machine_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_permission("processes.view"))):

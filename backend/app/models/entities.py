@@ -132,6 +132,7 @@ class Machine(Base):
     last_heartbeat = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=True)
+    drives = Column(JSON, nullable=True)  # latest partition-usage snapshot
 
     metrics = relationship("MachineMetric", back_populates="machine", cascade="all, delete-orphan")
     network_metrics = relationship("NetworkMetric", back_populates="machine", cascade="all, delete-orphan")

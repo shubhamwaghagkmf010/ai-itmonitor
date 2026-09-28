@@ -26,6 +26,46 @@ def get_system_info() -> Dict[str, Any]:
     }
 
 
+
+_SKIP_FS = {"squashfs", "tmpfs", "devtmpfs", "overlay", "aufs", "proc",
+            "sysfs", "cgroup", "cgroup2", "autofs"}
+
+
+def collect_drives():
+    """Every mounted partition with usage, using each OS's native mount names
+    (C:\\, D:\\ on Windows; /, /home on Linux/macOS). Anything unreadable
+    (empty CD/card readers, pseudo filesystems) is skipped, never fatal."""
+    drives = []
+    try:
+        parts = psutil.disk_partitions(all=False)
+    except Exception:
+        return drives
+    for pt in parts:
+        mp = pt.mountpoint
+        if not mp:
+            continue
+        opts = (pt.opts or "").lower()
+        if "cdrom" in opts or (pt.fstype or "").lower() in _SKIP_FS:
+            continue
+        try:
+            u = psutil.disk_usage(mp)
+        except (PermissionError, OSError):
+            continue
+        total_gb = round(u.total / (1024 ** 3), 2)
+        if total_gb <= 0:
+            continue
+        drives.append({
+            "mount": mp,
+            "device": pt.device if (pt.device and pt.device != mp) else "",
+            "fstype": pt.fstype or "",
+            "total_gb": total_gb,
+            "used_gb": round(u.used / (1024 ** 3), 2),
+            "free_gb": round(u.free / (1024 ** 3), 2),
+            "percent": u.percent,
+        })
+    return drives
+
+
 def collect_metrics() -> Dict[str, Any]:
     """Collects CPU, RAM, Disk, Network and Top Process telemetry."""
     # CPU
@@ -77,7 +117,8 @@ def collect_metrics() -> Dict[str, Any]:
         "bytes_recv": float(net.bytes_recv),
         "packets_sent": int(net.packets_sent),
         "packets_recv": int(net.packets_recv),
-        "top_processes": top_processes
+        "top_processes": top_processes,
+        "drives": collect_drives()
     }
 
 
