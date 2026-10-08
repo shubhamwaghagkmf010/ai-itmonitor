@@ -27,6 +27,68 @@ const WIDGET_LABELS = {
   incidentsTable: "Operational Incidents & AI RCA Diagnostic"
 };
 
+const SEV_STYLE = {
+  CRITICAL: 'bg-red-950 text-red-300 border-red-700',
+  HIGH: 'bg-orange-950 text-orange-300 border-orange-700',
+  MEDIUM: 'bg-amber-950 text-amber-300 border-amber-800',
+  LOW: 'bg-slate-800 text-slate-300 border-slate-600',
+};
+
+function inlineFmt(line) {
+  const nodes = [];
+  const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+  let last = 0, m, k = 0;
+  while ((m = re.exec(line)) !== null) {
+    if (m.index > last) nodes.push(line.slice(last, m.index));
+    if (m[2] !== undefined) nodes.push(<strong key={k++} className="text-white">{m[2]}</strong>);
+    else nodes.push(<code key={k++} className="bg-black/40 text-emerald-300 px-1 rounded font-mono">{m[3]}</code>);
+    last = re.lastIndex;
+  }
+  if (last < line.length) nodes.push(line.slice(last));
+  return nodes;
+}
+
+function ChatCodeBlock({ code }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(code); }
+    catch (e) {
+      const ta = document.createElement('textarea'); ta.value = code;
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (err) {}
+      document.body.removeChild(ta);
+    }
+    setCopied(true); setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="relative bg-[#0b0f19] border border-[#1e293b] rounded-lg my-1.5">
+      <button onClick={copy} className="absolute top-1.5 right-1.5 text-[10px] bg-[#1e293b] hover:bg-[#334155] text-slate-200 px-2 py-0.5 rounded">
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+      <pre className="p-3 pt-6 overflow-x-auto text-[11px] text-emerald-300 font-mono whitespace-pre-wrap break-words">{code}</pre>
+    </div>
+  );
+}
+
+function ChatMessage({ text }) {
+  const parts = [];
+  const re = /```[\w+-]*\n?([\s\S]*?)```/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push({ t: 'text', c: text.slice(last, m.index) });
+    parts.push({ t: 'code', c: m[1].replace(/\n$/, '') });
+    last = re.lastIndex;
+  }
+  if (last < text.length) parts.push({ t: 'text', c: text.slice(last) });
+  return (
+    <div className="space-y-1">
+      {parts.map((p, i) => p.t === 'code'
+        ? <ChatCodeBlock key={i} code={p.c} />
+        : <div key={i} className="whitespace-pre-wrap break-words">{p.c.split('\n').map((ln, j) => (<div key={j}>{inlineFmt(ln)}</div>))}</div>)}
+    </div>
+  );
+}
+
 export default function App() {
   const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [currentUser, setCurrentUser] = useState(() => {
@@ -114,6 +176,8 @@ export default function App() {
   const [procSortOrder, setProcSortOrder] = useState('desc');
   const [incidentStatusFilter, setIncidentStatusFilter] = useState('ALL');
   const [resolvingIncident, setResolvingIncident] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanReport, setScanReport] = useState(null);
   const [resolutionText, setResolutionText] = useState('');
 
   // Floating AI Chat State
@@ -533,6 +597,24 @@ export default function App() {
     }
   };
 
+  const runDiagnosticScan = async () => {
+    if (!selectedMachine) { alert("Select a node first (from the dashboard)."); return; }
+    setScanning(true);
+    setScanReport(null);
+    try {
+      const res = await axios.post(`${API_BASE}/incidents/diagnostic-scan/${selectedMachine.id}`, {}, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setScanReport(res.data);
+      fetchIncidents();
+      showToast(res.data.healthy ? "Scan complete: no problems found" : `Scan complete: ${res.data.findings.length} finding(s)`);
+    } catch (err) {
+      alert("Diagnostic scan failed: " + (err.response?.data?.detail || err.message));
+    } finally {
+      setScanning(false);
+    }
+  };
+
   const handleConfirmResolve = async () => {
     if (!resolvingIncident) return;
     try {
@@ -570,7 +652,7 @@ export default function App() {
         } : null
       }, { headers: { Authorization: `Bearer ${token}` } });
 
-      setChatMessages(prev => [...prev, { sender: 'bot', text: res.data.response || "Analysis complete." }]);
+      setChatMessages(prev => [...prev, { sender: 'bot', text: res.data.reply || "Analysis complete." }]);
     } catch {
       setChatMessages(prev => [...prev, { sender: 'bot', text: "AI Assistant temporarily busy. Please retry." }]);
     } finally {
@@ -1602,6 +1684,14 @@ export default function App() {
                     <AlertTriangle className="w-4 h-4 text-amber-400" /> Operational Incidents & AI RCA Diagnostic ({filteredIncidents.length})
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">Automated telemetry anomalies and AI root cause post-mortem generator</p>
+                  <button
+                    onClick={runDiagnosticScan}
+                    disabled={scanning || !selectedMachine || !hasPerm('incidents.analyze')}
+                    className="mt-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5"
+                  >
+                    {scanning ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                    {scanning ? 'Scanning...' : `Run Diagnostic Scan${selectedMachine ? ' - ' + selectedMachine.hostname : ' (select a node)'}`}
+                  </button>
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -1676,6 +1766,77 @@ export default function App() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {scanReport && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setScanReport(null)}>
+              <div className="bg-[#0f172a] border border-[#1e293b] rounded-2xl w-full max-w-3xl max-h-[85vh] overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                <div className="flex justify-between items-center px-5 py-3 border-b border-[#1e293b] sticky top-0 bg-[#0f172a] z-10">
+                  <h3 className="font-semibold text-white text-sm flex items-center gap-2"><Sparkles className="w-4 h-4 text-teal-400" /> AI Diagnostic Report &mdash; {scanReport.hostname}</h3>
+                  <button onClick={() => setScanReport(null)} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+                </div>
+                <div className="p-5 space-y-4">
+                  <div className="flex flex-wrap gap-2 text-[11px] font-semibold">
+                    {['CRITICAL','HIGH','MEDIUM','LOW'].map((k) => (
+                      <span key={k} className={`px-2.5 py-1 rounded border ${SEV_STYLE[k]}`}>{k}: {scanReport.counts?.[k] ?? 0}</span>
+                    ))}
+                    <span className="px-2.5 py-1 rounded border border-slate-700 text-slate-300">{scanReport.incidents_created || 0} incident(s) raised</span>
+                  </div>
+
+                  {scanReport.healthy ? (
+                    <div className="bg-emerald-950/40 border border-emerald-800 text-emerald-300 text-sm rounded-xl p-4">&#10003; No problems detected. This node is within normal thresholds.</div>
+                  ) : (
+                    <div className="space-y-2">
+                      <h4 className="text-xs uppercase tracking-wider text-slate-400">Findings ({scanReport.findings.length})</h4>
+                      {scanReport.findings.map((f, i) => (
+                        <div key={i} className="bg-[#131d31] border border-[#1e293b] rounded-xl p-3 space-y-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${SEV_STYLE[f.severity]}`}>{f.severity}</span>
+                            <span className="text-slate-200 text-sm font-semibold">{f.title}</span>
+                            <span className="text-[10px] text-slate-500 ml-auto">{f.category}</span>
+                          </div>
+                          <p className="text-xs text-slate-400">{f.detail}</p>
+                          {(f.remediation || []).length > 0 && (
+                            <div className="space-y-1">
+                              {f.remediation.map((cmd, j) => (
+                                <div key={j} className="flex items-center gap-2 bg-[#0b0f19] border border-[#1e293b] rounded px-2 py-1">
+                                  <code className="text-[11px] text-emerald-400 font-mono flex-1 break-all">{cmd}</code>
+                                  <button onClick={() => { setRemoteCommand(cmd); setScanReport(null); showToast('Command loaded into the Remote Console'); }} className="text-[10px] bg-teal-700 hover:bg-teal-600 text-white px-2 py-0.5 rounded whitespace-nowrap">Use in console</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {scanReport.ai_rca && (
+                    <div className="bg-[#131d31] border border-teal-800/40 rounded-xl p-4 space-y-2">
+                      <h4 className="text-xs uppercase tracking-wider text-teal-400 flex items-center gap-2"><Sparkles className="w-3.5 h-3.5" /> AI Root-Cause &amp; Fix <span className="text-[10px] text-slate-500 normal-case lowercase">({scanReport.ai_rca.model_name})</span></h4>
+                      <p className="text-sm text-slate-200">{scanReport.ai_rca.probable_cause}</p>
+                      {(scanReport.ai_rca.recommended_actions || []).length > 0 && (
+                        <div>
+                          <p className="text-[11px] text-slate-400 font-semibold mt-1">Recommended actions</p>
+                          <ul className="list-disc list-inside text-xs text-slate-300 space-y-0.5">
+                            {scanReport.ai_rca.recommended_actions.map((a, i) => (<li key={i} className="break-all">{a}</li>))}
+                          </ul>
+                        </div>
+                      )}
+                      {(scanReport.ai_rca.preventive_actions || []).length > 0 && (
+                        <div>
+                          <p className="text-[11px] text-slate-400 font-semibold mt-1">Preventive</p>
+                          <ul className="list-disc list-inside text-xs text-slate-400 space-y-0.5">
+                            {scanReport.ai_rca.preventive_actions.map((a, i) => (<li key={i}>{a}</li>))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-slate-500">Runs entirely on your local AI engine &mdash; no data leaves your network, and no ChatGPT / Gemini account is needed.</p>
+                </div>
               </div>
             </div>
           )}
@@ -2180,7 +2341,7 @@ export default function App() {
                     <div className={`p-2.5 rounded-xl max-w-[85%] leading-relaxed ${
                       msg.sender === 'user' ? 'bg-teal-600 text-white' : 'bg-[#0f172a] text-slate-200 border border-[#1e293b]'
                     }`}>
-                      {msg.text}
+                      {msg.sender === 'bot' ? <ChatMessage text={msg.text} /> : msg.text}
                     </div>
                   </div>
                 ))}

@@ -27,14 +27,33 @@ services:
       POSTGRES_DB: ai_itmonitor_db
       POSTGRES_PORT: 5432
       SCAN_SUBNET: "${SCAN_SUBNET:-}"
-      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      OLLAMA_BASE_URL: "http://ollama:11434"
       OLLAMA_MODEL: "qwen2.5:0.5b"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:
       - postgres
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai_itmonitor_ollama
+    restart: always
+    environment:
+      OLLAMA_MODEL: "qwen2.5:0.5b"
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        pid=$$!
+        echo "[ollama] waiting for server to come up..."
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        echo "[ollama] pulling model $${OLLAMA_MODEL} ..."
+        ollama pull "$${OLLAMA_MODEL}" || echo "[ollama] pull failed; app will keep retrying"
+        echo "[ollama] ready"
+        wait $$pid
 
   frontend:
     build:
@@ -49,3 +68,4 @@ services:
 
 volumes:
   pgdata:
+  ollama_data:

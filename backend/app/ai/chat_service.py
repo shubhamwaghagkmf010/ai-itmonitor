@@ -1,24 +1,52 @@
 import json
 import httpx
+from typing import Optional
 from sqlalchemy.orm import Session
 from backend.app.core.config import settings
 from backend.app.models.entities import Machine, Incident, AIAnalysis
 
 
-def query_ai_assistant(user_prompt: str, db: Session) -> str:
-    """
-    Advanced AI IT Operations Assistant with dual capability:
-    1. Real-time Infrastructure Observability & DB telemetry queries.
-    2. Interactive Problem Solving, Command Reference & Remediation Playbooks (ChatGPT / Gemini style).
-    """
+def _fallback(user_prompt: str, machines, incidents) -> str:
+    """Offline helper used when the local LLM is unreachable. Commands are wrapped
+    in fenced code blocks so the UI renders a copy button."""
+    p = user_prompt.lower()
+    if "cpu" in p or "load" in p:
+        return ("**High CPU - quick triage**\n"
+                "1. Find the top consumers:\n"
+                "```powershell\nGet-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name,Id,CPU\n```\n"
+                "```bash\nps -eo pid,comm,%cpu --sort=-%cpu | head -5\n```\n"
+                "2. Inspect or stop the runaway process (confirm first), or use the Remote Console / Diagnostic Scan.")
+    if "disk" in p or "space" in p or "storage" in p:
+        return ("**Free up disk space**\n"
+                "1. See what is using space:\n"
+                "```powershell\nGet-ChildItem C:\\ -Recurse -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object FullName,@{n='MB';e={[int]($_.Length/1MB)}} -First 20\n```\n"
+                "```bash\ndu -xh / 2>/dev/null | sort -rh | head -20\n```\n"
+                "2. Clear temp / rotate logs:\n"
+                "```bash\nsudo journalctl --vacuum-time=3d\n```")
+    if "memory" in p or "ram" in p:
+        return ("**High memory / leak triage**\n"
+                "```bash\nps -eo pid,comm,%mem --sort=-%mem | head -5\n```\n"
+                "Restart the offending service once identified:\n"
+                "```bash\nsudo systemctl restart <service>\n```")
+    unhealthy = len([m for m in machines if m.status.value != 'HEALTHY'])
+    open_inc = len([i for i in incidents if i.status.value == 'OPEN'])
+    return (f"**Fleet overview**\n- Monitored nodes: {len(machines)} ({unhealthy} not healthy)\n"
+            f"- Open incidents: {open_inc}\n\n"
+            "Ask me about a specific host, high CPU/RAM/disk, or how to fix an incident. "
+            "(Local AI engine is offline right now, so this is a summarised answer.)")
+
+
+def query_ai_assistant(user_prompt: str, db: Session, machine_context: Optional[dict] = None) -> str:
+    """AI SRE Copilot: answers grounded in this environment's live telemetry, and
+    returns ChatGPT-style formatted guidance with fenced, copyable commands."""
     machines = db.query(Machine).all()
     incidents = db.query(Incident).order_by(Incident.created_at.desc()).limit(5).all()
 
     machine_summary = [
-        {"host": m.hostname, "os": m.os_name, "status": m.status.value, "ip": m.ip_address}
+        {"host": m.hostname, "os": m.os_name, "status": m.status.value,
+         "ip": m.ip_address, "user": m.logged_in_user}
         for m in machines
     ]
-
     incident_summary = []
     for inc in incidents:
         rca = db.query(AIAnalysis).filter(AIAnalysis.incident_id == inc.id).first()
@@ -28,20 +56,28 @@ def query_ai_assistant(user_prompt: str, db: Session) -> str:
             "title": inc.title,
             "severity": inc.severity.value,
             "status": inc.status.value,
-            "resolution": inc.resolution_notes or "Unresolved",
-            "rca": rca.probable_cause if rca else "Pending"
+            "rca": rca.probable_cause if rca else "Pending",
         })
 
-    system_prompt = f"""You are an expert Senior Site Reliability Engineer (SRE) and AI IT Operations Assistant (AI-ITMonitor).
+    focused = f"\nCurrently viewed node: {json.dumps(machine_context)}" if machine_context else ""
 
-LIVE INFRASTRUCTURE STATE:
-Nodes: {json.dumps(machine_summary)}
-Recent Incidents: {json.dumps(incident_summary)}
+    system_prompt = f"""You are the AI Diagnostic SRE Copilot built into AI-ITMonitor. You have DIRECT ACCESS to this environment's live monitoring data below - treat it as ground truth.
 
-INSTRUCTIONS:
-1. If the user asks about monitored machines or incidents, answer accurately using the LIVE INFRASTRUCTURE STATE.
-2. If the user asks how to solve, troubleshoot, or fix a technical problem (such as high CPU, memory leaks, disk cleanup, hanging processes, or network issues), provide actionable, step-by-step technical instructions with exact Windows PowerShell or Linux terminal commands.
-3. Be clear, concise, and professional like ChatGPT/Gemini."""
+LIVE INFRASTRUCTURE STATE
+Monitored nodes ({len(machines)}): {json.dumps(machine_summary)}
+Recent incidents: {json.dumps(incident_summary)}{focused}
+
+HOW TO ANSWER
+- For questions about the monitored machines, incidents, logged-in users, CPU/RAM/disk or status, answer from the LIVE INFRASTRUCTURE STATE above - name the host and give the numbers. If it is not in the data, say you do not have that data yet.
+- For "how do I fix/troubleshoot" questions, give short numbered steps.
+- ALWAYS put any terminal command inside a fenced code block tagged with its shell, for example:
+```powershell
+Get-Process | Sort-Object CPU -Descending | Select-Object -First 5
+```
+```bash
+df -h
+```
+- Be concise and practical; prefer the exact commands over long prose."""
 
     try:
         with httpx.Client(timeout=120.0) as client:
@@ -51,22 +87,12 @@ INSTRUCTIONS:
                     "model": settings.OLLAMA_MODEL,
                     "prompt": f"{system_prompt}\n\nUser: {user_prompt}\nAssistant:",
                     "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 250
-                    }
-                }
+                    "options": {"temperature": 0.3, "num_predict": 512},
+                },
             )
             res.raise_for_status()
-            return res.json().get("response", "No response received from local AI engine.").strip()
+            reply = res.json().get("response", "").strip()
+            return reply or _fallback(user_prompt, machines, incidents)
     except Exception as e:
-        # Intelligent fallback for troubleshooting questions if LLM is offline
-        p_lower = user_prompt.lower()
-        if "cpu" in p_lower or "load" in p_lower:
-            return "🔧 High CPU Troubleshooting: 1) Identify top thread: Run `top -b -n 1` (Linux) or `Get-Process | Sort-Object CPU -Descending | Select -First 5` (Windows). 2) Check process logs for deadlock. 3) Terminate runaway process using 'End Process Tree' in Dashboard."
-        elif "disk" in p_lower or "space" in p_lower:
-            return "🧹 Disk Cleanup: 1) Check directory sizes: `df -h` and `du -sh /var/log/*` (Linux) or `cleanmgr.exe` / `Get-PSDrive` (Windows). 2) Rotate logs: `journalctl --vacuum-size=500M`. 3) Remove temp files."
-        elif "memory" in p_lower or "ram" in p_lower:
-            return "🧠 High RAM/Memory Leak Troubleshooting: 1) Check swap/pagefile: `free -m` (Linux). 2) Profile application garbage collection. 3) Restart service via `systemctl restart <service>`."
-        else:
-            return f"Infrastructure Overview: {len(machines)} monitored nodes ({len([m for m in machines if m.status.value != 'HEALTHY'])} unhealthy). Open Incidents: {len([i for i in incidents if i.status.value == 'OPEN'])}."
+        print(f"[!] Chat LLM fallback triggered: {e}")
+        return _fallback(user_prompt, machines, incidents)

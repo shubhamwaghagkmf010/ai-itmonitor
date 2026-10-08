@@ -7,10 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.models.entities import (
-    Incident, IncidentStatus, IncidentSeverity, MachineMetric, ProcessSnapshot, AIAnalysis, User
+    Incident, IncidentStatus, IncidentSeverity, MachineMetric, ProcessSnapshot, AIAnalysis, User, Machine
 )
 from backend.app.api.deps import get_current_user, require_permission, record_audit_event
-from backend.app.ai.ollama_service import analyze_incident_with_ai
+from backend.app.ai.ollama_service import analyze_incident_with_ai, analyze_diagnostics_with_ai
+from backend.app.services.diagnostics import run_diagnostic_scan
 from backend.app.services.report_generator import generate_incident_pdf
 
 router = APIRouter()
@@ -186,3 +187,103 @@ def export_incident_report(
         media_type="application/pdf", 
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+
+_SEV_MAP = {
+    "CRITICAL": IncidentSeverity.CRITICAL,
+    "HIGH": IncidentSeverity.HIGH,
+    "MEDIUM": IncidentSeverity.MEDIUM,
+    "LOW": IncidentSeverity.LOW,
+}
+_SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+
+@router.post("/diagnostic-scan/{machine_id}")
+def diagnostic_scan(
+    machine_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("incidents.analyze")),
+):
+    """Scan a machine's telemetry, raise/refresh incidents for serious findings,
+    attach a local-AI root-cause analysis, and return the full report."""
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+
+    report = run_diagnostic_scan(db, machine)
+
+    ctx = {
+        "hostname": machine.hostname,
+        "os_name": machine.os_name,
+        "cpu_percent": report["metrics"]["cpu_percent"],
+        "ram_percent": report["metrics"]["ram_percent"],
+        "disk_percent": report["metrics"]["disk_percent"],
+        "findings": report["findings"],
+    }
+    rca = analyze_diagnostics_with_ai(ctx)
+    report["ai_rca"] = rca
+
+    # Raise or refresh an OPEN incident per serious finding (dedup by machine+category)
+    serious = sorted(
+        [f for f in report["findings"] if f["severity"] in ("CRITICAL", "HIGH")],
+        key=lambda f: _SEV_RANK.get(f["severity"], 9),
+    )
+    created = 0
+    top_incident = None
+    for f in serious:
+        inc = (db.query(Incident)
+               .filter(Incident.machine_id == machine.id,
+                       Incident.category == f["category"],
+                       Incident.status == IncidentStatus.OPEN).first())
+        if inc:
+            inc.title = f["title"]
+            inc.description = f["detail"]
+            inc.severity = _SEV_MAP[f["severity"]]
+        else:
+            inc = Incident(
+                incident_code=f"INC-{machine.id}-{uuid.uuid4().hex[:6].upper()}",
+                title=f["title"],
+                description=f["detail"],
+                category=f["category"],
+                severity=_SEV_MAP[f["severity"]],
+                status=IncidentStatus.OPEN,
+                machine_id=machine.id,
+            )
+            db.add(inc)
+            created += 1
+        if top_incident is None:
+            top_incident = inc
+    db.commit()
+
+    # Attach the AI RCA to the most-severe incident so the table's RCA/PDF works
+    if top_incident is not None:
+        db.refresh(top_incident)
+        ai = db.query(AIAnalysis).filter(AIAnalysis.incident_id == top_incident.id).first()
+        if not ai:
+            ai = AIAnalysis(incident_id=top_incident.id, observed_facts=[], probable_cause="",
+                            evidence=[], recommended_actions=[], preventive_actions=[])
+            db.add(ai)
+        ai.observed_facts = rca.get("observed_facts", [])
+        ai.probable_cause = rca.get("probable_cause", "")
+        ai.evidence = rca.get("evidence", [])
+        ai.recommended_actions = rca.get("recommended_actions", [])
+        ai.preventive_actions = rca.get("preventive_actions", [])
+        ai.confidence_score = float(rca.get("confidence_score", 0.85))
+        ai.model_name = rca.get("model_name", "")
+        db.commit()
+        report["incident_id"] = top_incident.id
+        report["incident_code"] = top_incident.incident_code
+
+    report["incidents_created"] = created
+
+    record_audit_event(
+        db,
+        actor_email=current_user.email,
+        action="DIAGNOSTIC_SCAN",
+        target=machine.hostname,
+        ip_address=request.client.host if request.client else None,
+        details={"counts": report["counts"], "incidents_created": created},
+    )
+    return report
