@@ -1,8 +1,10 @@
 from typing import List, Optional, Any
 from datetime import datetime, timezone, timedelta
 import os
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Header
-from fastapi.responses import FileResponse
+import io
+import zipfile
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Header, Request
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -418,8 +420,54 @@ def software_search(q: str, db: Session = Depends(get_db),
 _AGENT_BUNDLE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "agent_dist", "ai-itmonitor-agent.zip"))
 
 
+_AGENT_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "agent"))
+_AGENT_PKG = os.path.join(_AGENT_SRC, "_pkg")
+
+
+def _agent_files():
+    out = {}
+    base = os.path.dirname(_AGENT_SRC)
+    for root, _dirs, names in os.walk(_AGENT_SRC):
+        if "__pycache__" in root or (os.sep + "_pkg") in (root + os.sep):
+            continue
+        for n in names:
+            if n.endswith(".pyc"):
+                continue
+            full = os.path.join(root, n)
+            rel = os.path.relpath(full, base).replace(os.sep, "/")
+            with open(full, "rb") as fh:
+                out[rel] = fh.read()
+    return out
+
+
+def _tpl(name, server_url):
+    with open(os.path.join(_AGENT_PKG, name), encoding="utf-8") as fh:
+        return fh.read().replace("__SERVER_URL__", server_url)
+
+
 @router.get("/download")
-def download_agent():
-    if not os.path.exists(_AGENT_BUNDLE):
-        raise HTTPException(status_code=404, detail="Agent bundle is not built on the server.")
-    return FileResponse(_AGENT_BUNDLE, media_type="application/zip", filename="ai-itmonitor-agent.zip")
+def download_agent(request: Request, os_name: str = Query("linux", alias="os")):
+    if not os.path.isdir(_AGENT_SRC):
+        raise HTTPException(status_code=404, detail="Agent source not found on the server.")
+    host = request.headers.get("host", "")
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    server_url = scheme + "://" + host + "/api/v1/agents"
+    target = (os_name or "linux").lower()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for rel, data in _agent_files().items():
+            z.writestr(rel, data)
+        z.writestr("requirements.txt", "httpx\npsutil\n")
+        z.writestr("README.txt", _tpl("README.txt", server_url))
+        if target == "windows":
+            z.writestr("run.bat", _tpl("run.bat", server_url))
+            fname = "ai-itmonitor-agent-windows.zip"
+        else:
+            z.writestr("run.sh", _tpl("run.sh", server_url))
+            z.writestr("install-ubuntu.sh", _tpl("install-ubuntu.sh", server_url))
+            fname = "ai-itmonitor-agent-linux.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="' + fname + '"'},
+    )

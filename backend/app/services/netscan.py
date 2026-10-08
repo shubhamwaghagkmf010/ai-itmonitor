@@ -8,6 +8,7 @@ Enrichment (best-effort, "as much as we can reach"):
   * type     - inferred from vendor + open ports
 No root, no nmap required.
 """
+import os
 import ipaddress
 import socket
 import subprocess
@@ -148,10 +149,13 @@ def _device_type(vendor, ports, os_guess):
 
 
 def get_local_subnet():
+    env = os.environ.get("SCAN_SUBNET")
+    if env and env.strip():
+        return env.strip()
     out = subprocess.run(["ip", "-4", "addr"], capture_output=True, text=True).stdout
     for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", out):
         ip, prefix = m.group(1), m.group(2)
-        if ip.startswith("127.") or ip.startswith("172.1"):
+        if ip.startswith("127.") or ip.startswith("172.17.") or ip.startswith("172.18."):
             continue
         return f"{ip}/{prefix}"
     return None

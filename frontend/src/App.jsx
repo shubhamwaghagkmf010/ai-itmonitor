@@ -255,6 +255,13 @@ export default function App() {
     } catch (e) { setNetworkDevices([]); }
   };
 
+  useEffect(() => {
+    if (!token) return;
+    axios.get(`${API_BASE}/network/subnet`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => { if (r.data && r.data.subnet) setScanSubnet((prev) => prev || r.data.subnet); })
+      .catch(() => {});
+  }, [token]);
+
   const runNetworkScan = async (targetOverride) => {
     const target = (targetOverride !== undefined ? targetOverride : scanSubnet) || null;
     setIsScanning(true);
@@ -1611,7 +1618,7 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <input value={scanSubnet} onChange={(e) => setScanSubnet(e.target.value)} placeholder="Auto (e.g. 192.168.1.0/24)" className="bg-[#0f172a] border border-[#334155] text-white text-xs rounded-lg px-3 py-2 w-56 focus:outline-none focus:border-teal-500" />
-              <button onClick={runNetworkScan} disabled={isScanning} className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
+              <button onClick={() => runNetworkScan()} disabled={isScanning} className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
                 {isScanning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Radio className="w-4 h-4" />} {isScanning ? 'Scanning...' : 'Scan Network'}
               </button>
               <button onClick={exportCSV} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
@@ -1735,9 +1742,7 @@ export default function App() {
               <h2 className="text-lg font-bold text-white flex items-center gap-2"><HardDrive className="w-5 h-5 text-teal-400" /> Machine Inventory</h2>
               <p className="text-xs text-slate-400 mt-1">Detailed hardware and the full installed-software list for each agent, plus a fleet-wide software search.</p>
             </div>
-            <a href={`${API_BASE}/agents/download`} className="bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap self-start">
-              <FileDown className="w-4 h-4" /> Download Agent (install on a machine for full details)
-            </a>
+            <AgentDownload />
           </div>
 
           {/* global software search */}
@@ -2305,6 +2310,24 @@ function ForcedPasswordChange({ token, onDone }) {
           <button type="submit" disabled={busy} className="w-full bg-teal-600 hover:bg-teal-500 text-white font-semibold py-2.5 rounded-lg text-sm disabled:opacity-50">{busy ? 'Updating...' : 'Update password'}</button>
         </form>
       </div>
+    </div>
+  );
+}
+
+
+function AgentDownload() {
+  const [os, setOs] = useState('windows');
+  return (
+    <div className="flex gap-2 self-start items-center">
+      <select value={os} onChange={(e) => setOs(e.target.value)}
+        className="bg-[#0f172a] border border-[#334155] text-white text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-teal-500">
+        <option value="windows">Windows</option>
+        <option value="linux">Linux</option>
+      </select>
+      <a href={`${API_BASE}/agents/download?os=${os}`}
+        className="bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
+        <FileDown className="w-4 h-4" /> Download Agent
+      </a>
     </div>
   );
 }
