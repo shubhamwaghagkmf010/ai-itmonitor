@@ -1,6 +1,7 @@
 from typing import List, Optional, Any
 from datetime import datetime, timezone, timedelta
 import os
+import re
 import io
 import zipfile
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Header, Request
@@ -35,6 +36,7 @@ class RegisterAgentPayload(BaseModel):
     ip_address: Optional[str] = None
     mac_address: Optional[str] = None
     logged_in_user: Optional[str] = "System"
+    machine_uid: Optional[str] = None
 
 class ProcessItem(BaseModel):
     pid: int
@@ -46,6 +48,7 @@ class ProcessItem(BaseModel):
 class IngestMetricsPayload(BaseModel):
     agent_id: str
     logged_in_user: Optional[str] = "System"
+    mac_address: Optional[str] = None
     cpu_percent: float
     ram_percent: float
     ram_used_gb: float
@@ -78,10 +81,15 @@ class CommandResultPayload(BaseModel):
 
 @router.post("/register")
 def register_agent(payload: RegisterAgentPayload, db: Session = Depends(get_db), _agent: bool = Depends(verify_agent_key)):
-    machine = db.query(Machine).filter(Machine.hostname == payload.hostname).first()
     now = datetime.now(timezone.utc)
-    if not machine:
+    uid = (payload.machine_uid or "").strip()
+    if uid:
+        agent_id = f"AGENT-{payload.hostname.upper()}-{uid[:8].upper()}"
+        machine = db.query(Machine).filter(Machine.agent_id == agent_id).first()
+    else:
         agent_id = f"AGENT-{payload.hostname.upper()}-{abs(hash(payload.hostname)) % 10000:04d}"
+        machine = db.query(Machine).filter(Machine.hostname == payload.hostname).first()
+    if not machine:
         machine = Machine(
             agent_id=agent_id,
             hostname=payload.hostname,
@@ -121,6 +129,8 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
     now = datetime.now(timezone.utc)
     machine.last_heartbeat = now
     machine.logged_in_user = payload.logged_in_user or machine.logged_in_user
+    if payload.mac_address and not machine.mac_address:
+        machine.mac_address = payload.mac_address.upper()
     machine.status = MachineStatus.HEALTHY
     if payload.drives is not None:
         machine.drives = payload.drives
@@ -444,6 +454,25 @@ def _tpl(name, server_url):
     with open(os.path.join(_AGENT_PKG, name), encoding="utf-8") as fh:
         return fh.read().replace("__SERVER_URL__", server_url)
 
+
+
+class SetMacPayload(BaseModel):
+    mac_address: str
+
+@router.post("/machines/{machine_id}/set-mac")
+def set_machine_mac(machine_id: int, payload: SetMacPayload, db: Session = Depends(get_db),
+                    current_user: User = Depends(require_permission("wol.manage"))):
+    """Manually set/correct a machine's physical MAC address (for nodes an agent
+    cannot auto-detect, or to override a wrong value)."""
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    mac = (payload.mac_address or "").strip().upper().replace("-", ":")
+    if not re.match(r"^([0-9A-F]{2}:){5}[0-9A-F]{2}$", mac):
+        raise HTTPException(status_code=400, detail="Invalid MAC address. Use AA:BB:CC:DD:EE:FF")
+    machine.mac_address = mac
+    db.commit()
+    return {"status": "updated", "mac_address": mac}
 
 @router.get("/download")
 def download_agent(request: Request, os_name: str = Query("linux", alias="os")):

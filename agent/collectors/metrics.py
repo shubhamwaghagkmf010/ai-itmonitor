@@ -3,6 +3,9 @@ import subprocess
 import shutil
 import socket
 import platform
+import getpass
+import os
+import uuid
 from typing import Dict, Any, List
 
 
@@ -22,9 +25,73 @@ def get_system_info() -> Dict[str, Any]:
         "os_version": platform.release(),
         "architecture": platform.machine(),
         "ip_address": ip_address,
-        "agent_version": "1.0.0"
+        "agent_version": "1.0.0",
+        "mac_address": get_mac_address(),
+        "logged_in_user": get_logged_in_user()
     }
 
+
+
+def get_logged_in_user() -> str:
+    """Best-effort: the interactive user currently logged in. Falls back to the
+    account the agent runs as, never raising."""
+    try:
+        sessions = psutil.users()
+        names = [u.name for u in sessions if getattr(u, "name", None)]
+        if names:
+            return sorted(set(names), key=names.count, reverse=True)[0]
+    except Exception:
+        pass
+    try:
+        return getpass.getuser()
+    except Exception:
+        try:
+            return os.getlogin()
+        except Exception:
+            return "System"
+
+
+def get_mac_address():
+    """MAC of the primary network interface (the one used to reach the internet),
+    normalised to AA:BB:CC:DD:EE:FF. Falls back to the node MAC, else None."""
+    primary_ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        primary_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
+    def _norm(mac):
+        mac = (mac or "").replace("-", ":").upper().strip()
+        return mac if len(mac.replace(":", "")) == 12 and mac not in ("00:00:00:00:00:00",) else None
+
+    try:
+        addrs = psutil.net_if_addrs()
+        if primary_ip:
+            for name, al in addrs.items():
+                if any(getattr(a, "family", None) == socket.AF_INET and a.address == primary_ip for a in al):
+                    for a in al:
+                        if getattr(a, "family", None) == psutil.AF_LINK:
+                            m = _norm(a.address)
+                            if m:
+                                return m
+        for name, al in addrs.items():
+            if name.lower().startswith(("lo", "docker", "veth", "br-", "virbr")):
+                continue
+            for a in al:
+                if getattr(a, "family", None) == psutil.AF_LINK:
+                    m = _norm(a.address)
+                    if m:
+                        return m
+    except Exception:
+        pass
+    try:
+        n = uuid.getnode()
+        return ":".join(f"{(n >> e) & 0xff:02X}" for e in range(40, -1, -8))
+    except Exception:
+        return None
 
 
 _SKIP_FS = {"squashfs", "tmpfs", "devtmpfs", "overlay", "aufs", "proc",
@@ -103,7 +170,7 @@ def collect_metrics() -> Dict[str, Any]:
 
     # Sort and pick top 5 resource consumers
     top_processes.sort(key=lambda x: (x['cpu_percent'], x['memory_percent']), reverse=True)
-    top_processes = top_processes[:5]
+    top_processes = top_processes[:300]
 
     return {
         "cpu_percent": cpu_percent,
@@ -118,7 +185,9 @@ def collect_metrics() -> Dict[str, Any]:
         "packets_sent": int(net.packets_sent),
         "packets_recv": int(net.packets_recv),
         "top_processes": top_processes,
-        "drives": collect_drives()
+        "drives": collect_drives(),
+        "logged_in_user": get_logged_in_user(),
+        "mac_address": get_mac_address()
     }
 
 

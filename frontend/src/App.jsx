@@ -79,6 +79,11 @@ export default function App() {
 
   // Interactive WOL Console States
   const [selectedWolTarget, setSelectedWolTarget] = useState(null);
+  const [macInput, setMacInput] = useState("");
+  const [serviceName, setServiceName] = useState("");
+  const [svcShow, setSvcShow] = useState(10);
+  const [ctnShow, setCtnShow] = useState(10);
+  const [healthSearch, setHealthSearch] = useState("");
   const [wolGeneratedCmd, setWolGeneratedCmd] = useState('');
   const [wolConsoleLogs, setWolConsoleLogs] = useState([]);
   const [isExecutingWol, setIsExecutingWol] = useState(false);
@@ -667,7 +672,7 @@ export default function App() {
             setConsoleOutput(`[Output from ${selectedMachine.hostname}]:\n` + outRes.data.output);
             setIsExecutingCmd(false);
             clearInterval(pollTimer);
-          } else if (attempts > 12) {
+          } else if (attempts > 30) {
             setConsoleOutput(`[TIMEOUT] Dispatched.`);
             setIsExecutingCmd(false);
             clearInterval(pollTimer);
@@ -680,6 +685,25 @@ export default function App() {
     } catch (err) {
       setConsoleOutput(`[ERROR] ${err.message}`);
       setIsExecutingCmd(false);
+    }
+  };
+
+  const saveMac = async (machineId) => {
+    const mac = (macInput || "").trim();
+    if (!/^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/.test(mac)) {
+      alert("Enter a valid MAC address, e.g. AA:BB:CC:DD:EE:FF");
+      return;
+    }
+    try {
+      const res = await axios.post(`${API_BASE}/agents/machines/${machineId}/set-mac`,
+        { mac_address: mac }, { headers: { Authorization: `Bearer ${token}` } });
+      const norm = res.data.mac_address;
+      setWolDevices((prev) => prev.map((d) => d.id === machineId
+        ? { ...d, mac_address: norm, has_valid_mac: true, wol_enabled: true } : d));
+      setSelectedWolTarget((prev) => prev ? { ...prev, mac_address: norm, has_valid_mac: true } : prev);
+      setMacInput("");
+    } catch (e) {
+      alert("Failed to save MAC: " + (e.response?.data?.detail || e.message));
     }
   };
 
@@ -1017,9 +1041,26 @@ export default function App() {
                         {selectedWolTarget.has_valid_mac ? (
                           <span className="text-teal-400 font-bold">{selectedWolTarget.mac_address}</span>
                         ) : (
-                          <span className="text-amber-400/90 font-sans bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40 text-[11px]">
-                            ⚠️ Not Configured (Blank)
-                          </span>
+                          <div className="space-y-1.5">
+                            <span className="inline-block text-amber-400/90 font-sans bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40 text-[11px]">
+                              ⚠️ Not Configured
+                            </span>
+                            <div className="flex gap-1">
+                              <input
+                                type="text"
+                                value={macInput}
+                                onChange={(e) => setMacInput(e.target.value)}
+                                placeholder="AA:BB:CC:DD:EE:FF"
+                                className="flex-1 min-w-0 bg-[#0f172a] border border-[#334155] rounded px-2 py-1 text-[11px] text-white font-mono focus:outline-none focus:border-teal-500"
+                              />
+                              <button
+                                onClick={() => saveMac(selectedWolTarget.id)}
+                                className="bg-teal-600 hover:bg-teal-500 text-white text-[11px] font-semibold px-2.5 py-1 rounded whitespace-nowrap"
+                              >
+                                Save MAC
+                              </button>
+                            </div>
+                          </div>
                         )}
                       </div>
                       <div>
@@ -1287,6 +1328,21 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="flex flex-wrap items-center gap-2 border-t border-[#1e293b] pt-3">
+                <span className="text-[11px] text-slate-400 font-semibold">Service control:</span>
+                <input
+                  type="text"
+                  placeholder="Service name (e.g. nginx, sshd, Spooler)"
+                  value={serviceName}
+                  onChange={(e) => setServiceName(e.target.value)}
+                  className="flex-1 min-w-[160px] bg-[#0f172a] border border-[#334155] rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-teal-500"
+                />
+                <button onClick={() => handleExecuteRemoteAction("SERVICE_START", { command_str: serviceName })} disabled={isExecutingCmd || !serviceName.trim() || !hasPerm('remote_ops.execute')} className="bg-emerald-700 hover:bg-emerald-600 text-white px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-50">Start</button>
+                <button onClick={() => handleExecuteRemoteAction("SERVICE_STOP", { command_str: serviceName })} disabled={isExecutingCmd || !serviceName.trim() || !hasPerm('remote_ops.execute')} className="bg-amber-700 hover:bg-amber-600 text-white px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-50">Stop</button>
+                <button onClick={() => handleExecuteRemoteAction("SERVICE_RESTART", { command_str: serviceName })} disabled={isExecutingCmd || !serviceName.trim() || !hasPerm('remote_ops.execute')} className="bg-teal-600 hover:bg-teal-500 text-white px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-50">Restart</button>
+                <button onClick={() => handleExecuteRemoteAction("SERVICE_STATUS", { command_str: serviceName })} disabled={isExecutingCmd || !serviceName.trim() || !hasPerm('remote_ops.execute')} className="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-50">Status</button>
+              </div>
+
               {consoleOutput && (
                 <div className="bg-[#0b0f19] border border-[#1e293b] rounded-xl p-4 font-mono text-xs text-slate-200">
                   <div className="flex justify-between items-center border-b border-[#1e293b] pb-2 mb-2 text-[11px] text-slate-400">
@@ -1316,57 +1372,75 @@ export default function App() {
                 <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-5 text-sm text-slate-500">
                   Select a node to view its services, containers, sensors and GPU.
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
-                    <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Layers className="w-4 h-4 text-teal-400" /> Services</div>
-                    {extendedMetrics.services ? (
-                      <>
-                        <p className="text-2xl font-bold text-teal-400 font-mono">{extendedMetrics.services.running ?? (extendedMetrics.services.items?.length || 0)}</p>
+              ) : (() => {
+                const em = extendedMetrics;
+                const _hq = (healthSearch || "").toLowerCase();
+                const svcItems = (em.services?.items || []).filter((x) => !_hq || (x.name || x.display_name || "").toLowerCase().includes(_hq));
+                const ctnItems = (em.containers?.items || []).filter((x) => !_hq || ((x.name || "") + " " + (x.image || "")).toLowerCase().includes(_hq));
+                const hasServices = !!(em.services && (svcItems.length || em.services.running));
+                const hasContainers = !!(em.containers && ((em.containers.count ?? 0) || ctnItems.length));
+                const hasSensors = !!(em.sensors && Object.keys(em.sensors).length);
+                const hasGpu = !!(em.gpu && (em.gpu.items?.length));
+                if (!hasServices && !hasContainers && !hasSensors && !hasGpu) {
+                  return (
+                    <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-5 text-sm text-slate-500">
+                      No extended telemetry reported by this host yet (no Docker containers, hardware temperature sensors or NVIDIA GPU detected).
+                    </div>
+                  );
+                }
+                return (
+                  <div className="space-y-3">
+                    <div className="relative max-w-xs">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                      <input type="text" placeholder="Search services / containers..." value={healthSearch} onChange={(e) => setHealthSearch(e.target.value)} className="w-full bg-[#131d31] border border-[#334155] rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-teal-500" />
+                    </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {hasServices && (
+                      <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
+                        <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Layers className="w-4 h-4 text-teal-400" /> Services</div>
+                        <p className="text-2xl font-bold text-teal-400 font-mono">{em.services.running ?? svcItems.length}</p>
                         <p className="text-[11px] text-slate-400">running</p>
-                        <div className="max-h-24 overflow-y-auto text-[11px] text-slate-400 space-y-0.5">
-                          {(extendedMetrics.services.items || []).slice(0, 8).map((s, i) => (<div key={i} className="truncate">{s.name || s.display_name}</div>))}
+                        <div className="max-h-28 overflow-y-auto text-[11px] text-slate-400 space-y-0.5">
+                          {svcItems.slice(0, svcShow).map((sv, i) => (<div key={i} className="truncate">{sv.name || sv.display_name}</div>))}
                         </div>
-                      </>
-                    ) : <p className="text-[11px] text-slate-500 italic">Not reported by this host</p>}
-                  </div>
-
-                  <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
-                    <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Server className="w-4 h-4 text-indigo-400" /> Containers</div>
-                    {extendedMetrics.containers ? (
-                      <>
-                        <p className="text-2xl font-bold text-indigo-400 font-mono">{extendedMetrics.containers.count ?? (extendedMetrics.containers.items?.length || 0)}</p>
+                        {svcItems.length > svcShow && (<button onClick={() => setSvcShow(svcShow + 10)} className="text-[11px] text-teal-400 hover:text-teal-300">Show more (+10)</button>)}
+                      </div>
+                    )}
+                    {hasContainers && (
+                      <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
+                        <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Server className="w-4 h-4 text-indigo-400" /> Containers</div>
+                        <p className="text-2xl font-bold text-indigo-400 font-mono">{em.containers.count ?? ctnItems.length}</p>
                         <p className="text-[11px] text-slate-400">running</p>
-                        <div className="max-h-24 overflow-y-auto text-[11px] text-slate-400 space-y-0.5">
-                          {(extendedMetrics.containers.items || []).slice(0, 8).map((c, i) => (<div key={i} className="truncate">{c.name} <span className="text-slate-600">{c.image}</span></div>))}
+                        <div className="max-h-28 overflow-y-auto text-[11px] text-slate-400 space-y-0.5">
+                          {ctnItems.slice(0, ctnShow).map((c, i) => (<div key={i} className="truncate">{c.name} <span className="text-slate-600">{c.image}</span></div>))}
                         </div>
-                      </>
-                    ) : <p className="text-[11px] text-slate-500 italic">Not reported by this host</p>}
-                  </div>
-
-                  <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
-                    <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Activity className="w-4 h-4 text-amber-400" /> Temperature</div>
-                    {extendedMetrics.sensors ? (
-                      <div className="max-h-32 overflow-y-auto text-[11px] text-slate-300 space-y-1">
-                        {Object.entries(extendedMetrics.sensors).flatMap(([chip, arr]) => (arr || []).map((se, i) => (
-                          <div key={chip + i} className="flex justify-between gap-2"><span className="truncate">{se.label || chip}</span><span className="font-mono text-amber-400">{se.current}&deg;C</span></div>
-                        )))}
+                        {ctnItems.length > ctnShow && (<button onClick={() => setCtnShow(ctnShow + 10)} className="text-[11px] text-indigo-400 hover:text-indigo-300">Show more (+10)</button>)}
                       </div>
-                    ) : <p className="text-[11px] text-slate-500 italic">Not reported by this host</p>}
-                  </div>
-
-                  <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
-                    <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Cpu className="w-4 h-4 text-emerald-400" /> GPU</div>
-                    {extendedMetrics.gpu ? (
-                      <div className="max-h-32 overflow-y-auto text-[11px] text-slate-300 space-y-1">
-                        {(extendedMetrics.gpu.items || []).map((g, i) => (
-                          <div key={i}><div className="truncate font-bold">{g.name}</div><div className="text-slate-400">util {g.util_percent}% &middot; {g.mem_used_mb}/{g.mem_total_mb} MB &middot; {g.temp_c}&deg;C</div></div>
-                        ))}
+                    )}
+                    {hasSensors && (
+                      <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
+                        <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Activity className="w-4 h-4 text-amber-400" /> Temperature</div>
+                        <div className="max-h-32 overflow-y-auto text-[11px] text-slate-300 space-y-1">
+                          {Object.entries(em.sensors).flatMap(([chip, arr]) => (arr || []).map((se, i) => (
+                            <div key={chip + i} className="flex justify-between gap-2"><span className="truncate">{se.label || chip}</span><span className="font-mono text-amber-400">{se.current}&deg;C</span></div>
+                          )))}
+                        </div>
                       </div>
-                    ) : <p className="text-[11px] text-slate-500 italic">Not reported by this host</p>}
+                    )}
+                    {hasGpu && (
+                      <div className="bg-[#131d31] border border-[#1e293b] rounded-xl p-4 space-y-2">
+                        <div className="flex items-center gap-2 text-slate-300 text-xs font-bold"><Cpu className="w-4 h-4 text-emerald-400" /> GPU</div>
+                        <div className="max-h-32 overflow-y-auto text-[11px] text-slate-300 space-y-1">
+                          {(em.gpu.items || []).map((g, i) => (
+                            <div key={i}><div className="truncate font-bold">{g.name}</div><div className="text-slate-400">util {g.util_percent}% &middot; {g.mem_used_mb}/{g.mem_total_mb} MB &middot; {g.temp_c}&deg;C</div></div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
+                  </div>
+                );
+              })()}
             </div>
           )}
 
