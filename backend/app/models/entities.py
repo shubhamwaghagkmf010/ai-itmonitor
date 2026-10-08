@@ -90,6 +90,7 @@ class User(Base):
     full_name = Column(String(255), nullable=True)
     role = Column(String(50), default="OPERATOR", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    must_change_password = Column(Boolean, default=False, nullable=False)
     
     permissions = Column(JSON, default=list, nullable=True)
     widget_permissions = Column(JSON, default=dict, nullable=True)

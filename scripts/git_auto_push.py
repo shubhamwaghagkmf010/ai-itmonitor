@@ -49,7 +49,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 # Values that are safe even though they match a pattern above (placeholders, examples).
 ALLOWLIST = {
     "YOUR_SECRET_KEY", "YOUR_DB_PASSWORD", "YOUR_API_KEY", "change_me",
-    "ChangeMe123!", "replace_this", "example", "localhost",
+    "ChangeMe123!", "replace_this", "example", "localhost", "192.168.1.0",
     # Documentation examples of private ranges are allowed in markdown only (handled below).
 }
 

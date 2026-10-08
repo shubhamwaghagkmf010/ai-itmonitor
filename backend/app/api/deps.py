@@ -62,6 +62,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def require_permission(required_permission: str) -> Callable:
     def permission_checker(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+        if getattr(current_user, "must_change_password", False):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password change required before continuing")
         if current_user.role == UserRole.ADMIN:
             return current_user
 

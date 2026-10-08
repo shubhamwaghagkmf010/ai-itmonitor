@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
-from backend.app.core.security import verify_password, create_access_token
+from backend.app.core.security import verify_password, create_access_token, get_password_hash
+from pydantic import BaseModel
 from backend.app.core.config import settings
 from backend.app.models.entities import User, AuditLog, DEFAULT_PERMISSIONS, DEFAULT_WIDGETS
 from backend.app.api.deps import get_current_user
@@ -75,7 +76,8 @@ def login(request: Request, db: Session = Depends(get_db), form_data: OAuth2Pass
             "full_name": user.full_name or "",
             "role": role_str,
             "permissions": effective_perms,
-            "widget_permissions": effective_widgets
+            "widget_permissions": effective_widgets,
+            "must_change_password": bool(getattr(user, "must_change_password", False))
         }
     }
 
@@ -91,5 +93,23 @@ def get_current_user_profile(current_user: User = Depends(get_current_user)):
         "full_name": current_user.full_name or "",
         "role": role_str,
         "permissions": effective_perms,
-        "widget_permissions": effective_widgets
+        "widget_permissions": effective_widgets,
+        "must_change_password": bool(getattr(current_user, "must_change_password", False))
     }
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password")
+def change_password(body: PasswordChange, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not verify_password(body.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    if len(body.new_password) < 6:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must be at least 6 characters")
+    current_user.hashed_password = get_password_hash(body.new_password)
+    current_user.must_change_password = False
+    db.commit()
+    return {"ok": True}

@@ -169,6 +169,13 @@ export default function App() {
     }
   };
 
+  const handlePasswordChanged = () => {
+    const u = { ...(currentUser || {}), must_change_password: false };
+    setCurrentUser(u);
+    try { localStorage.setItem('user_profile', JSON.stringify(u)); } catch (e) {}
+    showToast('Password updated. Welcome!');
+  };
+
   const handleLogout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user_profile');
@@ -794,6 +801,10 @@ export default function App() {
         </div>
       </div>
     );
+  }
+
+  if (currentUser && currentUser.must_change_password) {
+    return <ForcedPasswordChange token={token} onDone={handlePasswordChanged} />;
   }
 
   return (
@@ -2259,6 +2270,41 @@ export default function App() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+function ForcedPasswordChange({ token, onDone }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault(); setErr('');
+    if (next.length < 6) { setErr('New password must be at least 6 characters.'); return; }
+    if (next !== confirm) { setErr('Passwords do not match.'); return; }
+    setBusy(true);
+    try {
+      await axios.post(`${API_BASE}/auth/change-password`, { current_password: current, new_password: next }, { headers: { Authorization: `Bearer ${token}` } });
+      onDone();
+    } catch (e2) { setErr(e2.response?.data?.detail || 'Could not change password.'); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="min-h-screen bg-[#0b0f19] flex items-center justify-center p-4">
+      <div className="bg-[#1e293b] border border-[#334155] rounded-2xl p-8 max-w-md w-full shadow-2xl">
+        <h1 className="text-xl font-bold text-white mb-2">Set a new password</h1>
+        <p className="text-xs text-slate-400 mb-6">For security, you must change your password before continuing.</p>
+        {err && <div className="p-3 mb-4 bg-red-950/60 border border-red-500/50 text-red-300 rounded text-xs">{err}</div>}
+        <form onSubmit={submit} className="space-y-4">
+          <input type="password" required placeholder="Current password" value={current} onChange={(e)=>setCurrent(e.target.value)} className="w-full bg-[#0f172a] border border-[#334155] rounded px-3 py-2 text-white text-sm" />
+          <input type="password" required placeholder="New password" value={next} onChange={(e)=>setNext(e.target.value)} className="w-full bg-[#0f172a] border border-[#334155] rounded px-3 py-2 text-white text-sm" />
+          <input type="password" required placeholder="Confirm new password" value={confirm} onChange={(e)=>setConfirm(e.target.value)} className="w-full bg-[#0f172a] border border-[#334155] rounded px-3 py-2 text-white text-sm" />
+          <button type="submit" disabled={busy} className="w-full bg-teal-600 hover:bg-teal-500 text-white font-semibold py-2.5 rounded-lg text-sm disabled:opacity-50">{busy ? 'Updating...' : 'Update password'}</button>
+        </form>
+      </div>
     </div>
   );
 }
