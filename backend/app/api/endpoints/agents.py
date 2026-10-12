@@ -15,6 +15,7 @@ from backend.app.models.entities import (
 )
 from backend.app.api.deps import get_current_user, require_permission
 from backend.app.core.config import settings
+from backend.app.ai.ollama_service import analyze_app_health_with_ai
 
 router = APIRouter()
 
@@ -259,6 +260,258 @@ def get_processes(machine_id: int, db: Session = Depends(get_db), current_user: 
         }
         for p in procs
     ]
+
+
+# Friendly names for common applications (lower-cased exe -> display name)
+_APP_NAMES = {
+    "code.exe": "Visual Studio Code", "code - insiders.exe": "VS Code Insiders",
+    "eclipse.exe": "Eclipse IDE", "javaw.exe": "Java (javaw)", "java.exe": "Java",
+    "idea64.exe": "IntelliJ IDEA", "pycharm64.exe": "PyCharm", "studio64.exe": "Android Studio",
+    "devenv.exe": "Visual Studio", "ssms.exe": "SQL Server Mgmt Studio",
+    "chrome.exe": "Google Chrome", "msedge.exe": "Microsoft Edge",
+    "msedgewebview2.exe": "Edge WebView2 Runtime", "firefox.exe": "Mozilla Firefox",
+    "node.exe": "Node.js", "python.exe": "Python", "python3.exe": "Python",
+    "explorer.exe": "Windows Explorer", "dwm.exe": "Desktop Window Manager",
+    "msmpeng.exe": "Microsoft Defender", "svchost.exe": "Windows Service Host",
+    "outlook.exe": "Microsoft Outlook", "teams.exe": "Microsoft Teams",
+    "ms-teams.exe": "Microsoft Teams", "winword.exe": "Microsoft Word",
+    "excel.exe": "Microsoft Excel", "powerpnt.exe": "Microsoft PowerPoint",
+    "onedrive.exe": "OneDrive", "slack.exe": "Slack", "docker.exe": "Docker",
+    "postman.exe": "Postman", "ultraviewer_desktop.exe": "UltraViewer",
+}
+
+
+def _app_display_name(raw: str) -> str:
+    if not raw:
+        return "Unknown"
+    key = raw.strip().lower()
+    if key in _APP_NAMES:
+        return _APP_NAMES[key]
+    base = raw[:-4] if key.endswith(".exe") else raw
+    return base if base.isupper() else base.replace("_", " ").title()
+
+
+@router.get("/machines/{machine_id}/app-monitor")
+def app_monitor(machine_id: int, db: Session = Depends(get_db),
+                current_user: User = Depends(require_permission("processes.view"))):
+    """Group the newest process snapshot by application and classify each as
+    active / idle / unresponsive, with combined CPU & RAM and a plain-language
+    explanation of why a heavy app is consuming resources."""
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+
+    latest = db.query(func.max(ProcessSnapshot.timestamp)).filter(
+        ProcessSnapshot.machine_id == machine_id).scalar()
+    if not latest:
+        return {"machine_id": machine_id, "hostname": machine.hostname,
+                "as_of": None, "summary": {"active": 0, "idle": 0, "unresponsive": 0, "apps": 0},
+                "apps": []}
+
+    rows = db.query(ProcessSnapshot).filter(
+        ProcessSnapshot.machine_id == machine_id,
+        ProcessSnapshot.timestamp == latest).all()
+
+    ACTIVE_CPU = 1.0  # percent; at/above this a process counts as "active"
+
+    def classify(status: str, cpu: float) -> str:
+        st = (status or "").lower()
+        if "not responding" in st or "zombie" in st:
+            return "unresponsive"
+        if (cpu or 0) >= ACTIVE_CPU:
+            return "active"
+        return "idle"
+
+    groups = {}
+    for r in rows:
+        name = _app_display_name(r.name)
+        g = groups.setdefault(name, {
+            "app": name, "instances": 0, "cpu": 0.0, "mem": 0.0,
+            "max_cpu": 0.0, "max_mem": 0.0, "pids": [],
+            "active": 0, "idle": 0, "unresponsive": 0, "raw": r.name})
+        st = classify(r.status, r.cpu_percent)
+        g["instances"] += 1
+        g["cpu"] += r.cpu_percent or 0.0
+        g["mem"] += r.memory_percent or 0.0
+        g["max_cpu"] = max(g["max_cpu"], r.cpu_percent or 0.0)
+        g["max_mem"] = max(g["max_mem"], r.memory_percent or 0.0)
+        g[st] += 1
+        if len(g["pids"]) < 12:
+            g["pids"].append(r.pid)
+
+    def state_of(g) -> str:
+        if g["unresponsive"]:
+            return "unresponsive"
+        if g["active"]:
+            return "active"
+        return "idle"
+
+    def reasons(g, state) -> list:
+        out = []
+        cpu, mem, n, mx = round(g["cpu"], 1), round(g["mem"], 1), g["instances"], round(g["max_cpu"], 1)
+        if state == "unresponsive":
+            out.append("Window is hung (Not Responding) - app is stuck waiting on I/O, "
+                       "a locked resource or a long operation. End the task if it stays hung.")
+        if n >= 10:
+            out.append(f"{n} processes - a multi-process app (browser / Electron / WebView2). "
+                       "Each tab, pane or extension is its own process, so many open items inflate the total.")
+        if mx >= 25:
+            out.append(f"One process is using ~{mx}% CPU on its own - likely a heavy task "
+                       "(build/compile, a running query, indexing, or a busy loop).")
+        elif cpu >= 15 and n == 1:
+            out.append(f"This process is using ~{cpu}% CPU - a heavy task "
+                       "(a running query, a build/compile, or indexing).")
+        elif cpu >= 15:
+            out.append(f"~{cpu}% CPU spread across {n} processes - sustained background work.")
+        if mem >= 10:
+            out.append(f"~{mem}% of RAM across {n} process(es) - large working set "
+                       "(many tabs, a big heap, or large files open).")
+        if not out:
+            out.append("Usage is within a normal range.")
+        return out
+
+    apps = []
+    for g in groups.values():
+        state = state_of(g)
+        cpu, mem = round(g["cpu"], 1), round(g["mem"], 1)
+        heavy = state == "unresponsive" or cpu >= 15 or mem >= 10 or g["instances"] >= 15 or g["max_cpu"] >= 25
+        apps.append({
+            "app": g["app"], "process": g["raw"], "instances": g["instances"],
+            "cpu_percent": cpu, "mem_percent": mem,
+            "max_cpu": round(g["max_cpu"], 1), "max_mem": round(g["max_mem"], 1),
+            "state": state, "heavy": heavy,
+            "counts": {"active": g["active"], "idle": g["idle"], "unresponsive": g["unresponsive"]},
+            "pids": g["pids"],
+            "reasons": reasons(g, state) if heavy else [],
+        })
+
+    apps.sort(key=lambda a: (a["state"] == "unresponsive", a["cpu_percent"], a["mem_percent"]), reverse=True)
+    summary = {
+        "active": sum(a["counts"]["active"] for a in apps),
+        "idle": sum(a["counts"]["idle"] for a in apps),
+        "unresponsive": sum(a["counts"]["unresponsive"] for a in apps),
+        "apps": len(apps),
+    }
+    return {"machine_id": machine_id, "hostname": machine.hostname,
+            "as_of": latest.isoformat(), "summary": summary, "apps": apps}
+
+
+# System / critical processes we never offer to kill from a suggested fix.
+_CRITICAL_PROCS = {
+    "system", "svchost.exe", "services.exe", "lsass.exe", "wininit.exe",
+    "csrss.exe", "smss.exe", "winlogon.exe", "explorer.exe", "dwm.exe",
+    "msmpeng.exe", "registry", "memcompression", "fontdrvhost.exe",
+    "systemd", "init", "kthreadd",
+}
+_SEV_WEIGHT = {"high": 3, "medium": 2, "info": 1}
+
+
+@router.post("/machines/{machine_id}/app-analyze")
+def app_analyze(machine_id: int, db: Session = Depends(get_db),
+                current_user: User = Depends(require_permission("incidents.analyze"))):
+    """AI-assisted application root-cause analysis with guided, approve-then-apply
+    fixes. The AI explains the cause; the executable fixes are built here (trusted)
+    and run only when a user clicks Apply (which dispatches a normal remote action)."""
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+
+    mon = app_monitor(machine_id, db=db, current_user=current_user)
+    apps = mon.get("apps", [])
+    latest = db.query(func.max(ProcessSnapshot.timestamp)).filter(
+        ProcessSnapshot.machine_id == machine_id).scalar()
+
+    met = db.query(MachineMetric).filter(MachineMetric.machine_id == machine_id)\
+        .order_by(MachineMetric.timestamp.desc()).first()
+    host = {
+        "cpu": round(met.cpu_percent, 1) if met else None,
+        "ram": round(met.ram_percent, 1) if met else None,
+        "disk": round(met.disk_percent, 1) if met else None,
+    }
+
+    def top_proc(raw_name):
+        r = db.query(ProcessSnapshot).filter(
+            ProcessSnapshot.machine_id == machine_id,
+            ProcessSnapshot.timestamp == latest,
+            ProcessSnapshot.name == raw_name
+        ).order_by(ProcessSnapshot.cpu_percent.desc()).first()
+        return r
+
+    fixes = []
+    for a in apps:
+        if not (a.get("heavy") or a.get("state") == "unresponsive"):
+            continue
+        raw = (a.get("process") or "").lower()
+        is_critical = raw in _CRITICAL_PROCS
+        tp = top_proc(a.get("process"))
+        pid = tp.pid if tp else None
+
+        if a.get("state") == "unresponsive" and pid and not is_critical:
+            fixes.append({
+                "app": a["app"], "severity": "high", "risk": "medium",
+                "title": f"End unresponsive {a['app']} (PID {pid})",
+                "rationale": "The application window is hung (Not Responding). Ending it frees the "
+                             "resources it is holding. Any unsaved work inside that app may be lost.",
+                "action": {"command_type": "KILL_PROCESS", "pid": pid},
+                "command_preview": f"End process PID {pid} ({a.get('process')})",
+            })
+        elif a.get("max_cpu", 0) >= 50 and pid and not is_critical:
+            fixes.append({
+                "app": a["app"], "severity": "high", "risk": "high",
+                "title": f"Stop high-CPU process {a['app']} (PID {pid})",
+                "rationale": f"A single {a.get('process')} process is using ~{a.get('max_cpu')}% CPU. If this is "
+                             "not expected work (a build/query/indexing), ending it will relieve the CPU. "
+                             "Confirm with the user first - ending a working app can lose data.",
+                "action": {"command_type": "KILL_PROCESS", "pid": pid},
+                "command_preview": f"End process PID {pid} ({a.get('process')})",
+            })
+        elif a.get("instances", 0) >= 15 and a.get("mem_percent", 0) >= 15:
+            fixes.append({
+                "app": a["app"], "severity": "medium", "risk": "info",
+                "title": f"Reduce {a['app']} footprint",
+                "rationale": f"{a['app']} is running {a.get('instances')} processes and holding "
+                             f"~{a.get('mem_percent')}% of RAM. Closing unused tabs/windows (or restarting the "
+                             "app) is the safest way to recover memory. No remote command is applied automatically.",
+                "action": None,
+                "command_preview": None,
+            })
+        elif is_critical:
+            fixes.append({
+                "app": a["app"], "severity": "info", "risk": "info",
+                "title": f"{a['app']} is busy (system component)",
+                "rationale": f"{a['app']} is a Windows system component using ~{a.get('cpu_percent')}% CPU / "
+                             f"~{a.get('mem_percent')}% RAM. It is not safe to end it directly; if it stays high, "
+                             "a reboot or a targeted service restart is the correct remedy.",
+                "action": None, "command_preview": None,
+            })
+        else:
+            fixes.append({
+                "app": a["app"], "severity": "medium", "risk": "info",
+                "title": f"Monitor {a['app']}",
+                "rationale": f"{a['app']} is using ~{a.get('cpu_percent')}% CPU / ~{a.get('mem_percent')}% RAM. "
+                             "If it stays elevated, inspect the in-app task driving it.",
+                "action": None, "command_preview": None,
+            })
+
+    fixes.sort(key=lambda f: _SEV_WEIGHT.get(f["severity"], 0), reverse=True)
+    fixes = fixes[:10]
+
+    heavy_compact = [{
+        "app": a["app"], "state": a["state"], "cpu": a["cpu_percent"],
+        "mem": a["mem_percent"], "instances": a["instances"],
+    } for a in apps if a.get("heavy") or a.get("state") == "unresponsive"][:6]
+
+    ai = analyze_app_health_with_ai({
+        "hostname": machine.hostname, "os_name": machine.os_name,
+        "host": host, "heavy_apps": heavy_compact,
+    })
+
+    return {
+        "machine_id": machine_id, "hostname": machine.hostname,
+        "as_of": latest.isoformat() if latest else None,
+        "host": host, "summary": mon.get("summary"),
+        "root_cause": ai, "fixes": fixes,
+    }
 
 @router.post("/machines/{machine_id}/kill-process")
 def kill_process(machine_id: int, pid: int = Query(...), db: Session = Depends(get_db), current_user: User = Depends(require_permission("processes.kill"))):

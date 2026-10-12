@@ -162,3 +162,69 @@ Explain the most likely root cause and give concrete fix steps (exact {('PowerSh
     except Exception as e:
         print(f"[!] Diagnostics LLM fallback triggered: {e}")
         return generate_fallback_diagnostics(context)
+
+
+def _fallback_app_health(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Deterministic root-cause narrative for application health when the local
+    LLM is unavailable."""
+    apps = context.get("heavy_apps", [])
+    host = context.get("host", {})
+    hostname = context.get("hostname", "this node")
+    if not apps:
+        return {
+            "probable_cause": f"No application is consuming excessive resources on {hostname} "
+                              f"(CPU {host.get('cpu')}%, RAM {host.get('ram')}%). Nothing needs action right now.",
+            "observed_facts": [], "model_name": "deterministic",
+        }
+    facts = [f"{a['app']}: {a['state']}, CPU {a['cpu']}%, RAM {a['mem']}% across {a['instances']} process(es)"
+             for a in apps[:5]]
+    lead = apps[0]
+    if lead["state"] == "unresponsive":
+        cause = (f"{lead['app']} on {hostname} is not responding (hung). A hung window usually means the "
+                 f"app is blocked waiting on disk/network I/O or a locked resource. Ending it recovers the node.")
+    elif lead.get("instances", 0) >= 10:
+        cause = (f"The main pressure on {hostname} is {lead['app']} running {lead['instances']} processes "
+                 f"(~{lead['cpu']}% CPU, ~{lead['mem']}% RAM) - a multi-process app where each tab/pane/extension "
+                 f"adds a process. Closing unused tabs/windows is the cheapest win.")
+    else:
+        cause = (f"{lead['app']} is the top consumer on {hostname} at ~{lead['cpu']}% CPU / ~{lead['mem']}% RAM, "
+                 f"consistent with a heavy in-app task (a query, build/compile or indexing).")
+    return {"probable_cause": cause, "observed_facts": facts, "model_name": "deterministic"}
+
+
+def analyze_app_health_with_ai(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Short plain-language root cause for which apps are stressing a node, from
+    the local LLM with a deterministic fallback. Executable fixes are built by the
+    backend (trusted), not by the model - this only narrates the cause."""
+    apps = context.get("heavy_apps", [])
+    if not apps:
+        return _fallback_app_health(context)
+    host = context.get("host", {})
+    prompt = f"""You are an IT operations assistant. On host {context.get('hostname')} ({context.get('os_name')}) the current readings are CPU {host.get('cpu')}%, RAM {host.get('ram')}%, Disk {host.get('disk')}%.
+These applications are consuming the most resources (JSON):
+{json.dumps(apps)[:2000]}
+
+In 2-4 sentences explain the most likely root cause of the resource pressure and which application is responsible. Be specific and practical. Do NOT invent commands. Return ONLY JSON:
+{{"probable_cause": "2-4 sentence explanation", "observed_facts": ["fact", "fact"]}}"""
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.2, "num_predict": 350},
+                },
+            )
+            response.raise_for_status()
+            result = json.loads(response.json().get("response", "{}"))
+            if not result.get("probable_cause"):
+                return _fallback_app_health(context)
+            result.setdefault("observed_facts", [])
+            result["model_name"] = settings.OLLAMA_MODEL
+            return result
+    except Exception as e:
+        print(f"[!] App-health LLM fallback triggered: {e}")
+        return _fallback_app_health(context)

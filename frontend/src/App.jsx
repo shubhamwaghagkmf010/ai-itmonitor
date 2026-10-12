@@ -110,6 +110,11 @@ export default function App() {
   const [metricsHistory, setMetricsHistory] = useState([]);
   const [liveProcesses, setLiveProcesses] = useState([]);
   const [extendedMetrics, setExtendedMetrics] = useState(null);
+  const [appMonitor, setAppMonitor] = useState(null);
+  const [appMonSearch, setAppMonSearch] = useState('');
+  const [appMonState, setAppMonState] = useState('all');
+  const [appAnalysis, setAppAnalysis] = useState(null);
+  const [analyzingApp, setAnalyzingApp] = useState(false);
   const [chartRange, setChartRange] = useState('live');
   const [historyData, setHistoryData] = useState([]);
   const [networkDevices, setNetworkDevices] = useState([]);
@@ -458,6 +463,11 @@ export default function App() {
         setExtendedMetrics(extRes.data || null);
       } catch (e) { setExtendedMetrics(null); }
 
+      try {
+        const amRes = await axios.get(`${API_BASE}/agents/machines/${machineId}/app-monitor`, { headers: { Authorization: `Bearer ${activeToken}` } });
+        setAppMonitor(amRes.data || null);
+      } catch (e) { setAppMonitor(null); }
+
       const targetMachine = machines.find(m => m.id === machineId) || selectedMachine;
       const isLinux = targetMachine?.os_name?.toLowerCase().includes('linux') || targetMachine?.os_name?.toLowerCase().includes('ubuntu');
 
@@ -780,6 +790,19 @@ export default function App() {
     } catch (err) {
       setConsoleOutput(`[ERROR] ${err.message}`);
       setIsExecutingCmd(false);
+    }
+  };
+
+  const runAppAnalysis = async () => {
+    if (!selectedMachine) return;
+    setAnalyzingApp(true); setAppAnalysis(null);
+    try {
+      const res = await axios.post(`${API_BASE}/agents/machines/${selectedMachine.id}/app-analyze`, {}, authHdr());
+      setAppAnalysis(res.data);
+    } catch (e) {
+      showToast(`[!] AI analysis failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setAnalyzingApp(false);
     }
   };
 
@@ -1614,6 +1637,138 @@ export default function App() {
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* 6b. Application Monitor (per-app state + why heavy) */}
+          {isWidgetAllowed('taskManager') && appMonitor && (
+            <div className="bg-[#131d31] border border-[#1e293b] rounded-xl overflow-hidden shadow-sm">
+              <div className="p-4 border-b border-[#1e293b] flex flex-col md:flex-row justify-between items-start md:items-center gap-3 bg-[#0f172a]/50">
+                <div>
+                  <h3 className="font-semibold text-white text-sm flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-indigo-400" /> Application Monitor — {appMonitor.hostname || selectedMachine?.hostname || 'No node'}
+                  </h3>
+                  <div className="flex flex-wrap gap-2 mt-2 text-[11px]">
+                    <span className="px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800">Active: {appMonitor.summary?.active ?? 0}</span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">Idle: {appMonitor.summary?.idle ?? 0}</span>
+                    <span className="px-2 py-0.5 rounded bg-red-950 text-red-400 border border-red-800">Unresponsive: {appMonitor.summary?.unresponsive ?? 0}</span>
+                    <span className="px-2 py-0.5 rounded bg-[#0f172a] text-slate-400 border border-[#1e293b]">{appMonitor.summary?.apps ?? 0} apps</span>
+                    {appMonitor.as_of && <span className="text-slate-500">as of {new Date(appMonitor.as_of).toLocaleTimeString()}</span>}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto">
+                  <div className="relative flex-1 md:w-56">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                    <input type="text" placeholder="Search application..." value={appMonSearch}
+                      onChange={(e) => setAppMonSearch(e.target.value)}
+                      className="w-full bg-[#131d31] border border-[#334155] rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500" />
+                  </div>
+                  <select value={appMonState} onChange={(e) => setAppMonState(e.target.value)}
+                    className="bg-[#131d31] border border-[#334155] text-xs text-white rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-indigo-500">
+                    <option value="all">All states</option>
+                    <option value="active">Active</option>
+                    <option value="idle">Idle</option>
+                    <option value="unresponsive">Unresponsive</option>
+                  </select>
+                  <button onClick={runAppAnalysis} disabled={analyzingApp || !hasPerm('incidents.analyze')}
+                    className="bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50 whitespace-nowrap">
+                    {analyzingApp ? 'Analyzing...' : '🤖 Analyze with AI'}
+                  </button>
+                </div>
+              </div>
+              {appAnalysis && (
+                <div className="px-5 py-4 border-b border-[#1e293b] bg-[#0b1322] space-y-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-indigo-300 font-semibold mb-1">AI Root Cause</div>
+                    <p className="text-sm text-slate-200">{appAnalysis.root_cause?.probable_cause}</p>
+                    {appAnalysis.root_cause?.observed_facts?.length > 0 && (
+                      <ul className="mt-1 list-disc list-inside text-xs text-slate-400 space-y-0.5">
+                        {appAnalysis.root_cause.observed_facts.map((f, i) => <li key={i}>{f}</li>)}
+                      </ul>
+                    )}
+                    <div className="text-[10px] text-slate-500 mt-1">engine: {appAnalysis.root_cause?.model_name}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-indigo-300 font-semibold mb-1">Suggested Fixes ({appAnalysis.fixes?.length || 0}) — review, then Apply</div>
+                    {(!appAnalysis.fixes || appAnalysis.fixes.length === 0) && <p className="text-xs text-slate-500">No action needed — nothing is consuming excessive resources.</p>}
+                    <div className="space-y-2">
+                      {(appAnalysis.fixes || []).map((fx, i) => {
+                        const sev = fx.severity === 'high' ? 'text-red-400 border-red-800 bg-red-950' : fx.severity === 'medium' ? 'text-amber-400 border-amber-800 bg-amber-950' : 'text-slate-300 border-slate-700 bg-slate-800';
+                        const riskBadge = fx.risk === 'high' ? 'bg-red-900 text-red-300' : fx.risk === 'medium' ? 'bg-amber-900 text-amber-300' : 'bg-slate-700 text-slate-300';
+                        return (
+                          <div key={i} className="border border-[#1e293b] rounded-lg p-3 bg-[#131d31]">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${sev}`}>{(fx.severity || '').toUpperCase()}</span>
+                                  <span className="text-sm font-medium text-white">{fx.title}</span>
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${riskBadge}`}>risk: {fx.risk}</span>
+                                </div>
+                                <p className="text-xs text-slate-400 mt-1">{fx.rationale}</p>
+                                {fx.command_preview && <div className="text-[11px] font-mono text-emerald-300 mt-1">{fx.command_preview}</div>}
+                              </div>
+                              {fx.action && hasPerm('remote_ops.execute') && (
+                                <button onClick={() => { if (window.confirm(`Apply this fix on ${appAnalysis.hostname}?\n\n${fx.title}`)) handleExecuteRemoteAction(fx.action.command_type, { pid: fx.action.pid, command_str: fx.action.command_str }); }}
+                                  disabled={isExecutingCmd}
+                                  className="shrink-0 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50">Apply</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {isExecutingCmd || (consoleOutput && consoleOutput.includes('Output from')) ? (
+                      <pre className="mt-2 text-[11px] text-slate-300 bg-black/40 rounded p-2 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">{consoleOutput}</pre>
+                    ) : null}
+                  </div>
+                </div>
+              )}
+              <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                <table className="w-full text-left text-sm text-slate-300">
+                  <thead className="bg-[#0f172a] text-xs text-slate-400 uppercase border-b border-[#1e293b] sticky top-0 z-10">
+                    <tr>
+                      <th className="px-5 py-3">Application</th>
+                      <th className="px-5 py-3">State</th>
+                      <th className="px-5 py-3">Instances</th>
+                      <th className="px-5 py-3">CPU</th>
+                      <th className="px-5 py-3">RAM</th>
+                      <th className="px-5 py-3">Why it is heavy</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#1e293b]">
+                    {(appMonitor.apps || [])
+                      .filter(a => appMonState === 'all' || a.state === appMonState)
+                      .filter(a => !appMonSearch || (a.app || '').toLowerCase().includes(appMonSearch.toLowerCase()) || (a.process || '').toLowerCase().includes(appMonSearch.toLowerCase()))
+                      .map((a, idx) => {
+                        const sBadge = a.state === 'unresponsive'
+                          ? 'bg-red-950 text-red-400 border-red-800 animate-pulse'
+                          : a.state === 'active' ? 'bg-emerald-950 text-emerald-400 border-emerald-800'
+                          : 'bg-slate-800 text-slate-300 border-slate-700';
+                        return (
+                          <tr key={idx} className={`hover:bg-[#1e293b]/60 transition ${a.heavy ? 'bg-amber-950/10' : ''}`}>
+                            <td className="px-5 py-3 font-medium text-white">
+                              {a.app}
+                              <div className="text-[10px] text-slate-500 font-mono">{a.process}</div>
+                            </td>
+                            <td className="px-5 py-3">
+                              <span className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${sBadge}`}>
+                                {a.state === 'unresponsive' ? 'Not Responding' : a.state.charAt(0).toUpperCase() + a.state.slice(1)}
+                              </span>
+                            </td>
+                            <td className="px-5 py-3 font-mono text-xs text-slate-400">{a.instances}</td>
+                            <td className="px-5 py-3 font-semibold text-teal-400">{a.cpu_percent}%</td>
+                            <td className="px-5 py-3 text-sky-400">{a.mem_percent}%</td>
+                            <td className="px-5 py-3 text-xs text-slate-400 max-w-md">
+                              {a.reasons && a.reasons.length > 0
+                                ? <ul className="list-disc list-inside space-y-0.5">{a.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+                                : <span className="text-slate-600">—</span>}
+                            </td>
+                          </tr>
+                        );
+                      })}
                   </tbody>
                 </table>
               </div>

@@ -133,6 +133,30 @@ def collect_drives():
     return drives
 
 
+def _not_responding_pids():
+    """Windows-only: PIDs the OS reports as 'Not Responding' (hung GUI apps).
+    psutil has no cross-platform hung state, so we ask tasklist. Empty set on
+    non-Windows or on any error."""
+    if platform.system() != "Windows":
+        return set()
+    try:
+        out = subprocess.run(
+            ["tasklist", "/fi", "STATUS eq NOT RESPONDING", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=10
+        ).stdout or ""
+        pids = set()
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or not line.startswith('"'):
+                continue
+            cols = line[1:-1].split('","') if line.endswith('"') else line[1:].split('","')
+            if len(cols) >= 2 and cols[1].strip().isdigit():
+                pids.add(int(cols[1].strip()))
+        return pids
+    except Exception:
+        return set()
+
+
 def collect_metrics() -> Dict[str, Any]:
     """Collects CPU, RAM, Disk, Network and Top Process telemetry."""
     # CPU
@@ -152,18 +176,20 @@ def collect_metrics() -> Dict[str, Any]:
     # Network
     net = psutil.net_io_counters()
 
-    # Top 5 CPU/Memory Processes
+    # Running processes (with hung-app detection on Windows)
+    hung_pids = _not_responding_pids()
     top_processes: List[Dict[str, Any]] = []
     for proc in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent', 'status']):
         try:
             info = proc.info
             if info['name'] and info['pid'] != 0:
+                _st = "Not Responding" if info['pid'] in hung_pids else (info.get('status') or "running")
                 top_processes.append({
                     "pid": info['pid'],
                     "name": info['name'],
                     "cpu_percent": round(info.get('cpu_percent') or 0.0, 1),
                     "memory_percent": round(info.get('memory_percent') or 0.0, 1),
-                    "status": info.get('status') or "running"
+                    "status": _st
                 })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
