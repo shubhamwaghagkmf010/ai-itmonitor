@@ -399,6 +399,19 @@ export default function App() {
 
   const authHdr = () => ({ headers: { Authorization: `Bearer ${token}` } });
 
+  const deleteMachine = async (m) => {
+    if (!window.confirm(`Remove node "${m.hostname}" (${m.agent_id}) and all of its telemetry?\n\nIf an agent is still running on that host, it will re-appear on its next check-in.`)) return;
+    try {
+      await axios.delete(`${API_BASE}/agents/machines/${m.id}`, authHdr());
+      setMachines((prev) => prev.filter((x) => x.id !== m.id));
+      setSelectedMachine((prev) => (prev && prev.id === m.id ? null : prev));
+      showToast(`[-] Node removed: ${m.hostname}`);
+      fetchData();
+    } catch (e) {
+      showToast(`[!] Could not remove node: ${e.response?.data?.detail || e.message}`);
+    }
+  };
+
   const fetchAssets = async () => {
     try { const r = await axios.get(`${API_BASE}/assets`, authHdr()); setAssets(r.data || []); } catch (e) { setAssets([]); }
   };
@@ -1665,6 +1678,15 @@ export default function App() {
                             >
                               {isSelected ? '✓ Inspecting' : 'Inspect'}
                             </button>
+                                                      {hasPerm('wol.manage') && (
+                              <button
+                                onClick={() => deleteMachine(m)}
+                                title="Remove this node (duplicate / decommissioned)"
+                                className="ml-2 text-xs px-3 py-1.5 rounded-lg border font-semibold transition bg-red-950 text-red-400 border-red-800 hover:bg-red-900"
+                              >
+                                Delete
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );

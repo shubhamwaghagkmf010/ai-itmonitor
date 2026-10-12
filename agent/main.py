@@ -13,7 +13,7 @@ from pathlib import Path
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agent.collectors.metrics import get_system_info, collect_metrics, collect_extended
+from agent.collectors.metrics import get_system_info, collect_metrics, collect_extended, get_mac_address
 from agent.collectors.inventory import collect_inventory
 
 CONFIG_FILE = Path(__file__).parent / "agent_config.json"
@@ -35,17 +35,39 @@ def save_config(config: dict):
         json.dump(config, f, indent=4)
 
 
+def _hardware_uid() -> str:
+    """A stable identifier for THIS physical machine. Derived from the primary NIC
+    MAC so it survives re-downloading the agent (no duplicate node) yet differs
+    between machines - even cloned Windows images that share a hostname/config
+    (they have different network cards, hence different MACs)."""
+    try:
+        mac = (get_mac_address() or "").replace(":", "").replace("-", "").strip().lower()
+        if mac and len(mac) == 12 and mac != "000000000000":
+            return mac
+    except Exception:
+        pass
+    try:
+        node = uuid.getnode()
+        # bit 0x010000000000 set => random/locally-administered (not real hardware)
+        if node and not (node >> 40) & 0x1:
+            return f"{node:012x}"
+    except Exception:
+        pass
+    return ""
+
+
 def register_agent(client: httpx.Client) -> str:
     config = load_config()
-    if not config.get("machine_uid"):
-        config["machine_uid"] = uuid.uuid4().hex
+    uid = _hardware_uid() or config.get("machine_uid") or uuid.uuid4().hex
+    if uid != config.get("machine_uid"):
+        config["machine_uid"] = uid
         save_config(config)
-    if config.get("agent_id") and config.get("registered_uid") == config["machine_uid"]:
+    if config.get("agent_id") and config.get("registered_uid") == uid:
         return config["agent_id"]
 
     system_info = get_system_info()
-    system_info["machine_uid"] = config["machine_uid"]
-    print(f"[*] Registering node '{system_info['hostname']}' ({system_info['os_name']}) uid={config['machine_uid'][:8]} with central server...")
+    system_info["machine_uid"] = uid
+    print(f"[*] Registering node '{system_info['hostname']}' ({system_info['os_name']}) uid={uid[:8]} with central server...")
     
     try:
         response = client.post(f"{SERVER_URL}/register", json=system_info, timeout=10.0)

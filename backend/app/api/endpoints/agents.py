@@ -474,6 +474,22 @@ def set_machine_mac(machine_id: int, payload: SetMacPayload, db: Session = Depen
     db.commit()
     return {"status": "updated", "mac_address": mac}
 
+
+@router.delete("/machines/{machine_id}")
+def delete_machine(machine_id: int, db: Session = Depends(get_db),
+                   current_user: User = Depends(require_permission("wol.manage"))):
+    """Remove a monitored node and all of its telemetry, incidents and commands.
+    Used to clean up duplicate or decommissioned machines. Child rows are removed
+    via ON DELETE CASCADE. If an agent is still running on that host it will
+    re-register as a node again on its next check-in."""
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+    hostname = machine.hostname
+    db.delete(machine)
+    db.commit()
+    return {"status": "deleted", "machine_id": machine_id, "hostname": hostname}
+
 @router.get("/download")
 def download_agent(request: Request, os_name: str = Query("linux", alias="os")):
     if not os.path.isdir(_AGENT_SRC):
