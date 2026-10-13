@@ -7,6 +7,7 @@ import getpass
 import os
 import uuid
 from typing import Dict, Any, List
+from agent.version import AGENT_VERSION
 
 
 def get_system_info() -> Dict[str, Any]:
@@ -25,7 +26,7 @@ def get_system_info() -> Dict[str, Any]:
         "os_version": platform.release(),
         "architecture": platform.machine(),
         "ip_address": ip_address,
-        "agent_version": "1.0.0",
+        "agent_version": AGENT_VERSION,
         "mac_address": get_mac_address(),
         "logged_in_user": get_logged_in_user()
     }

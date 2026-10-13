@@ -16,6 +16,7 @@ from backend.app.models.entities import (
 from backend.app.api.deps import get_current_user, require_permission
 from backend.app.core.config import settings
 from backend.app.ai.ollama_service import analyze_app_health_with_ai
+from backend.app.ai.ollama_service import analyze_slowness_with_ai
 
 router = APIRouter()
 
@@ -194,7 +195,8 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
         c.status = "DISPATCHED"
     db.commit()
 
-    return {"status": "ingested", "machine_status": machine.status.value, "pending_commands": cmds}
+    return {"status": "ingested", "machine_status": machine.status.value,
+            "pending_commands": cmds, "latest_agent_version": _latest_agent_version()}
 
 @router.get("/machines")
 def get_machines(db: Session = Depends(get_db), current_user: User = Depends(require_permission("telemetry.view"))):
@@ -513,6 +515,147 @@ def app_analyze(machine_id: int, db: Session = Depends(get_db),
         "root_cause": ai, "fixes": fixes,
     }
 
+
+@router.post("/machines/{machine_id}/diagnose")
+def diagnose_slowness(machine_id: int, db: Session = Depends(get_db),
+                      current_user: User = Depends(require_permission("incidents.analyze"))):
+    """Explain WHY a node is slow/hanging even when the overview looks normal.
+    Reads the latest stored metrics and process snapshot, surfaces the specific
+    bottleneck (single-core peg, memory pressure, disk-full, hung apps, process
+    storm), narrates the root cause with the local AI, and offers guided,
+    approve-then-apply fixes. For disk I/O (which the dashboard does not store),
+    the UI can also dispatch a live DIAGNOSE_SYSTEM deep scan."""
+    machine = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not machine:
+        raise HTTPException(status_code=404, detail="Machine not found")
+
+    met = db.query(MachineMetric).filter(MachineMetric.machine_id == machine_id)\
+        .order_by(MachineMetric.timestamp.desc()).first()
+    host = {
+        "cpu": round(met.cpu_percent, 1) if met else None,
+        "ram": round(met.ram_percent, 1) if met else None,
+        "disk": round(met.disk_percent, 1) if met else None,
+    }
+
+    latest = db.query(func.max(ProcessSnapshot.timestamp)).filter(
+        ProcessSnapshot.machine_id == machine_id).scalar()
+    procs = []
+    if latest:
+        procs = db.query(ProcessSnapshot).filter(
+            ProcessSnapshot.machine_id == machine_id,
+            ProcessSnapshot.timestamp == latest).all()
+
+    def is_crit(name):
+        return (name or "").lower() in _CRITICAL_PROCS
+
+    findings, fixes = [], []
+
+    # 1) hung / Not Responding windows
+    hung = [pr for pr in procs if "not responding" in (pr.status or "").lower()
+            or (pr.status or "").lower() == "zombie"]
+    for pr in hung[:5]:
+        findings.append({
+            "severity": "high",
+            "title": f"{pr.name} is not responding (hung)",
+            "detail": f"PID {pr.pid} has stopped responding. A hung window often blocks on disk or "
+                      "network I/O and can freeze the desktop.",
+        })
+        if not is_crit(pr.name):
+            fixes.append({
+                "app": pr.name, "severity": "high", "risk": "medium",
+                "title": f"End unresponsive {pr.name} (PID {pr.pid})",
+                "rationale": "The window is hung. Ending it frees what it holds; unsaved work in that app may be lost.",
+                "action": {"command_type": "KILL_PROCESS", "pid": pr.pid},
+                "command_preview": f"End process PID {pr.pid} ({pr.name})",
+            })
+
+    # 2) single process pegging CPU (classic: overview CPU low, one core maxed)
+    runaway = sorted([pr for pr in procs if (pr.cpu_percent or 0) >= 80],
+                     key=lambda r: r.cpu_percent or 0, reverse=True)
+    for pr in runaway[:4]:
+        crit = is_crit(pr.name)
+        findings.append({
+            "severity": "high",
+            "title": f"{pr.name} is using ~{round(pr.cpu_percent,1)}% CPU",
+            "detail": f"PID {pr.pid} is a heavy CPU consumer. If this is not expected work "
+                      "(a build/query/scan), it is the likely reason the machine feels slow.",
+        })
+        if not crit:
+            fixes.append({
+                "app": pr.name, "severity": "high", "risk": "high",
+                "title": f"Stop high-CPU {pr.name} (PID {pr.pid})",
+                "rationale": f"{pr.name} is pegging the CPU at ~{round(pr.cpu_percent,1)}%. Confirm with the user "
+                             "first - ending a working app can lose data.",
+                "action": {"command_type": "KILL_PROCESS", "pid": pr.pid},
+                "command_preview": f"End process PID {pr.pid} ({pr.name})",
+            })
+        else:
+            fixes.append({
+                "app": pr.name, "severity": "medium", "risk": "info",
+                "title": f"{pr.name} (system component) is busy",
+                "rationale": f"{pr.name} is a Windows system process using ~{round(pr.cpu_percent,1)}% CPU. Do not end "
+                             "it directly; if it stays high a reboot or a targeted service restart is the right remedy.",
+                "action": None, "command_preview": None,
+            })
+
+    # 3) host-level signals
+    if host["cpu"] is not None and host["cpu"] >= 85:
+        findings.append({
+            "severity": "high" if host["cpu"] >= 95 else "medium",
+            "title": f"Overall CPU is high ({host['cpu']}%)",
+            "detail": "Sustained high total CPU makes everything sluggish. See the top consumers above.",
+        })
+    if host["ram"] is not None and host["ram"] >= 88:
+        findings.append({
+            "severity": "high" if host["ram"] >= 95 else "medium",
+            "title": f"Memory is nearly full ({host['ram']}%)",
+            "detail": "Low free RAM forces the system to page to disk (pagefile thrashing), which slows the whole machine.",
+        })
+        fixes.append({
+            "app": "Memory", "severity": "medium", "risk": "info",
+            "title": "Relieve memory pressure",
+            "rationale": "Close unused apps/browser tabs, or reboot. If this recurs, the machine likely needs more RAM.",
+            "action": None, "command_preview": None,
+        })
+    if host["disk"] is not None and host["disk"] >= 90:
+        findings.append({
+            "severity": "high" if host["disk"] >= 97 else "medium",
+            "title": f"System disk is almost full ({host['disk']}%)",
+            "detail": "A nearly full system disk slows Windows (no room for pagefile/temp) and can cause stalls.",
+        })
+        fixes.append({
+            "app": "Disk", "severity": "medium", "risk": "info",
+            "title": "Free up disk space",
+            "rationale": "Clear temp files/Recycle Bin, run Disk Cleanup, or move large files off C:.",
+            "action": None, "command_preview": None,
+        })
+
+    # 4) process storm
+    if len(procs) >= 250:
+        findings.append({
+            "severity": "info",
+            "title": f"{len(procs)} processes are running",
+            "detail": "A very large process count adds scheduling and memory overhead; review startup apps.",
+        })
+
+    sev_rank = {"high": 3, "medium": 2, "info": 1}
+    findings.sort(key=lambda f: sev_rank.get(f["severity"], 0), reverse=True)
+    fixes.sort(key=lambda f: sev_rank.get(f["severity"], 0), reverse=True)
+    fixes = fixes[:10]
+
+    ai = analyze_slowness_with_ai({
+        "hostname": machine.hostname, "os_name": machine.os_name,
+        "host": host, "findings": findings[:8],
+    })
+
+    return {
+        "machine_id": machine_id, "hostname": machine.hostname,
+        "as_of": latest.isoformat() if latest else None,
+        "host": host, "metric_age": (met.timestamp.isoformat() if met else None),
+        "process_count": len(procs),
+        "findings": findings, "root_cause": ai, "fixes": fixes,
+    }
+
 @router.post("/machines/{machine_id}/kill-process")
 def kill_process(machine_id: int, pid: int = Query(...), db: Session = Depends(get_db), current_user: User = Depends(require_permission("processes.kill"))):
     machine = db.query(Machine).filter(Machine.id == machine_id).first()
@@ -708,6 +851,20 @@ def _tpl(name, server_url):
         return fh.read().replace("__SERVER_URL__", server_url)
 
 
+def _latest_agent_version():
+    """The version the server considers current - read live from agent/version.py,
+    the same file packaged into /download. Bumping it there makes every agent
+    auto-update. Falls back to 0.0.0 if it cannot be read."""
+    try:
+        with open(os.path.join(_AGENT_SRC, "version.py"), encoding="utf-8") as fh:
+            m = re.search(r'AGENT_VERSION\s*=\s*["\']([^"\']+)["\']', fh.read())
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return "0.0.0"
+
+
 
 class SetMacPayload(BaseModel):
     mac_address: str
@@ -769,3 +926,29 @@ def download_agent(request: Request, os_name: str = Query("linux", alias="os")):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="' + fname + '"'},
     )
+
+
+@router.get("/version")
+def agent_latest_version():
+    """The current agent version the server is serving. Agents poll this as an
+    hourly fallback; the same value also rides every /metrics heartbeat."""
+    return {"version": _latest_agent_version()}
+
+
+@router.post("/push-update")
+def push_agent_update(machine_id: Optional[int] = Query(None), db: Session = Depends(get_db),
+                      current_user: User = Depends(require_permission("wol.manage"))):
+    """Tell agents to update to the latest version NOW, without waiting for their
+    next version check. Queues an UPDATE_AGENT command (delivered on the next
+    ~10s heartbeat). Pass machine_id to target one node, or omit for all."""
+    q = db.query(Machine)
+    if machine_id is not None:
+        q = q.filter(Machine.id == machine_id)
+    machines = q.all()
+    n = 0
+    for m in machines:
+        db.add(AgentCommand(machine_id=m.id, command_type="UPDATE_AGENT",
+                            payload_json={}, status="PENDING"))
+        n += 1
+    db.commit()
+    return {"status": "queued", "agents": n, "latest_version": _latest_agent_version()}

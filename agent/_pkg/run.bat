@@ -2,7 +2,8 @@
 setlocal EnableDelayedExpansion
 title AI-ITMonitor Agent
 
-REM --- Require administrator (needed for service control / reboot) ---
+REM --- Require administrator (needed to install into Program Files, create the
+REM     scheduled task, kill process trees, control services, reboot) ---
 net session >nul 2>&1
 if %errorLevel% neq 0 (
   echo [*] Requesting administrator privileges...
@@ -12,6 +13,37 @@ if %errorLevel% neq 0 (
 
 set "SERVER_URL=__SERVER_URL__"
 set "INVENTORY_INTERVAL=1800"
+set "INSTALL_DIR=%ProgramFiles%\AI-ITMonitor"
+
+REM --- If we are NOT already running from the protected install dir, install there
+REM     first and hand off to the installed copy. This makes the download/extract
+REM     folder disposable - deleting it never breaks the agent or its auto-start. ---
+if /I "%~dp0"=="%INSTALL_DIR%\" goto installed
+
+echo [*] Installing AI-ITMonitor agent into "%INSTALL_DIR%" ^(protected location^)...
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+xcopy /e /i /y "%~dp0agent" "%INSTALL_DIR%\agent" >nul
+copy /y "%~f0" "%INSTALL_DIR%\run.bat" >nul
+
+REM Lock it down so only SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544) can
+REM modify the agent; standard Users (S-1-5-32-545) get read+execute only. This
+REM stops a normal user or user-level malware from tampering with the agent.
+icacls "%INSTALL_DIR%" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" >nul 2>&1
+
+echo [*] Registering auto-start task "AIITMonitorAgent" ^(points to the installed copy^)...
+schtasks /create /tn "AIITMonitorAgent" /tr "\"%INSTALL_DIR%\run.bat\"" /sc onstart /ru SYSTEM /rl highest /f >nul 2>&1
+if !errorLevel! equ 0 (
+  echo [*] Auto-start installed - the agent will start automatically after every reboot.
+) else (
+  echo [!] Could not register the auto-start task ^(continuing anyway^).
+)
+
+echo [*] Install complete. Launching the installed agent...
+start "" "%INSTALL_DIR%\run.bat"
+echo [*] You may now close this window and delete the downloaded folder.
+exit /b
+
+:installed
 set "PYTHONPATH=%~dp0"
 
 REM --- Find a working Python interpreter ---
@@ -63,12 +95,37 @@ if %errorLevel% neq 0 (
   exit /b 1
 )
 
-echo [*] Starting AI-ITMonitor agent...
-%PY% "%~dp0agent/main.py"
+REM --- Self-heal: make sure the auto-start task still exists and points here ---
+schtasks /query /tn "AIITMonitorAgent" >nul 2>&1
+if %errorLevel% neq 0 (
+  schtasks /create /tn "AIITMonitorAgent" /tr "\"%~f0\"" /sc onstart /ru SYSTEM /rl highest /f >nul 2>&1
+)
+
+REM ============================================================
+REM  Supervisor loop: run the agent, apply staged updates, and
+REM  restart on exit/crash. Exit code 42 = "update staged".
+REM ============================================================
+:run_loop
 echo.
-echo [*] Agent stopped.
-pause
-exit /b
+echo [*] Starting AI-ITMonitor agent...
+%PY% "%~dp0agent\main.py"
+set "RC=%errorLevel%"
+
+if "%RC%"=="42" (
+  echo [*] An update was downloaded - applying...
+  if exist "%~dp0_staging\agent" (
+    xcopy /e /i /y "%~dp0_staging\agent" "%~dp0agent" >nul
+    rmdir /s /q "%~dp0_staging" >nul 2>&1
+    echo [*] Update applied. Restarting the agent...
+  ) else (
+    echo [!] Update folder not found - restarting on the current version.
+  )
+  goto run_loop
+)
+
+echo [*] Agent exited (code %RC%). Restarting in 10 seconds...  (close this window to stop)
+timeout /t 10 /nobreak >nul
+goto run_loop
 
 REM ============================================================
 REM  find_python: sets PY to a working interpreter, or leaves it unset

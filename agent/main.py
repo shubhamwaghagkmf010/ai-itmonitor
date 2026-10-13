@@ -14,6 +14,8 @@ from pathlib import Path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from agent.collectors.metrics import get_system_info, collect_metrics, collect_extended, get_mac_address
+from agent.collectors.metrics import _not_responding_pids
+from agent.version import AGENT_VERSION
 from agent.collectors.inventory import collect_inventory
 
 CONFIG_FILE = Path(__file__).parent / "agent_config.json"
@@ -21,6 +23,92 @@ SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8000/api/v1/agents")
 METRIC_INTERVAL_SECONDS = int(os.getenv("METRIC_INTERVAL", "10"))
 INVENTORY_INTERVAL = int(os.getenv("INVENTORY_INTERVAL", "1800"))  # 30 min
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", "")
+
+# --- Self-update -----------------------------------------------------------
+# The server always serves the latest agent code at /download and advertises the
+# latest version in every /metrics heartbeat (and via GET /version). When a newer
+# version is seen (or the server pushes an UPDATE_AGENT command), the agent stages
+# the new bundle and exits with code 42; the launcher (run.bat) swaps it in and
+# relaunches. Windows-only - the launcher supervises the restart there.
+UPDATE_CHECK_INTERVAL = int(os.getenv("UPDATE_CHECK_INTERVAL", "3600"))  # hourly fallback poll
+ROOT_DIR = Path(__file__).resolve().parent.parent   # folder that holds agent/ and run.bat
+STAGING_DIR = ROOT_DIR / "_staging"
+UPDATE_EXIT_CODE = 42
+
+
+def _parse_ver(v):
+    parts = []
+    for piece in str(v).split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _download_update():
+    """Download the latest bundle into a clean _staging dir next to this install.
+    Returns True only if the new agent code is present. Never raises."""
+    import zipfile, io as _io, shutil
+    try:
+        target = "windows" if platform.system() == "Windows" else "linux"
+        url = f"{SERVER_URL}/download?os={target}"
+        headers = {"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {}
+        with httpx.Client(headers=headers) as c:
+            r = c.get(url, timeout=90.0)
+            r.raise_for_status()
+            content = r.content
+        if STAGING_DIR.exists():
+            shutil.rmtree(STAGING_DIR, ignore_errors=True)
+        STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(_io.BytesIO(content)) as z:
+            z.extractall(STAGING_DIR)
+        if not (STAGING_DIR / "agent" / "main.py").exists():
+            shutil.rmtree(STAGING_DIR, ignore_errors=True)
+            print("[update] staged bundle missing agent/main.py - aborting")
+            return False
+        return True
+    except Exception as e:
+        print(f"[update] download failed: {e}")
+        return False
+
+
+def _maybe_update(latest):
+    """If the server's latest version is newer than ours, stage it and exit 42."""
+    if platform.system() != "Windows" or not latest:
+        return
+    try:
+        if _parse_ver(latest) > _parse_ver(AGENT_VERSION):
+            print(f"[update] v{latest} available (running v{AGENT_VERSION}); downloading...")
+            if _download_update():
+                print("[update] staged; restarting via launcher to apply...")
+                sys.stdout.flush()
+                sys.exit(UPDATE_EXIT_CODE)
+            print(f"[update] download failed; staying on v{AGENT_VERSION}")
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[update] check error: {e}")
+
+
+def _handle_update_command(client, agent_id, cid):
+    """Server-pushed UPDATE_AGENT: stage the latest bundle and exit 42 so the
+    launcher applies it. Returns a FAILED tuple only when it could not."""
+    if platform.system() != "Windows":
+        return "FAILED", "Auto-update is Windows-only in this build."
+    if _download_update():
+        try:
+            client.post(f"{SERVER_URL}/command-result",
+                        json={"agent_id": agent_id, "command_id": cid,
+                              "status": "COMPLETED",
+                              "output": "Update staged; restarting launcher to apply."},
+                        timeout=15.0)
+        except Exception:
+            pass
+        sys.stdout.flush()
+        sys.exit(UPDATE_EXIT_CODE)
+    return "FAILED", "Update download failed; staying on current version."
+
 
 
 def load_config() -> dict:
@@ -126,7 +214,7 @@ def _start_wol_relay():
 
     threading.Thread(target=_listen, daemon=True).start()
 
-EXEC_TIMEOUT = int(os.getenv("CMD_TIMEOUT", "20"))
+EXEC_TIMEOUT = int(os.getenv("CMD_TIMEOUT", "45"))
 
 
 def _run_cmd(args, timeout=EXEC_TIMEOUT):
@@ -177,12 +265,134 @@ def _service_action(action, name):
 
 
 def _kill_process(pid):
+    """Force-terminate a process AND its child tree, then verify it is actually
+    gone. Windows uses taskkill /F /T (kills the whole tree); elsewhere psutil
+    SIGKILL on children then the parent. Reports the truth - if the process is
+    still alive afterwards (e.g. access denied) it returns FAILED, not success."""
+    import psutil
     try:
-        import psutil
-        psutil.Process(int(pid)).terminate()
-        return "COMPLETED", f"Terminate signal sent to PID {pid}"
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return "FAILED", f"Invalid PID: {pid!r}"
+    try:
+        name = psutil.Process(pid).name()
+    except Exception:
+        name = str(pid)
+    detail = ""
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                                 capture_output=True, text=True, timeout=25)
+            detail = ((out.stdout or "") + (out.stderr or "")).strip()
+        else:
+            try:
+                parent = psutil.Process(pid)
+                victims = parent.children(recursive=True) + [parent]
+            except psutil.NoSuchProcess:
+                victims = []
+            for v in victims:
+                try:
+                    v.kill()
+                except Exception:
+                    pass
+            psutil.wait_procs(victims, timeout=5)
+    except subprocess.TimeoutExpired:
+        return "FAILED", f"Kill timed out for PID {pid} ({name})"
     except Exception as e:
         return "FAILED", f"{type(e).__name__}: {e}"
+    time.sleep(0.4)
+    if psutil.pid_exists(pid):
+        try:
+            if psutil.Process(pid).status() != psutil.STATUS_ZOMBIE:
+                msg = f"PID {pid} ({name}) is STILL running after force-kill."
+                if "denied" in detail.lower():
+                    msg += " Access denied - the agent must run as Administrator/root to end this process."
+                elif detail:
+                    msg += " " + detail
+                return "FAILED", msg
+        except psutil.NoSuchProcess:
+            pass
+    return "COMPLETED", f"Ended process tree for PID {pid} ({name})."
+
+
+def _diagnose_system():
+    """Live, best-effort snapshot of what is stressing the host RIGHT NOW - the
+    signals a slow machine shows that averaged dashboard metrics miss: disk I/O,
+    pagefile/swap, per-core CPU and the current top consumers. Never raises."""
+    import psutil
+    lines = []
+    try:
+        per = psutil.cpu_percent(interval=1.0, percpu=True)
+        overall = round(sum(per) / len(per), 1) if per else 0.0
+        busiest = round(max(per), 1) if per else 0.0
+        lines.append(f"CPU: {overall}% overall across {len(per)} core(s); busiest core {busiest}%")
+        if busiest >= 90 and overall < 60:
+            lines.append("  -> One core is saturated (a single-threaded task). That app feels "
+                         "slow even though total CPU looks low.")
+    except Exception as e:
+        lines.append(f"CPU: unavailable ({e})")
+    try:
+        vm = psutil.virtual_memory()
+        sm = psutil.swap_memory()
+        lines.append(f"Memory: {vm.percent}% used, {round(vm.available/1024**3,2)} GB free; "
+                     f"pagefile/swap {sm.percent}% used")
+        if vm.percent >= 90 or sm.percent >= 50:
+            lines.append("  -> Memory pressure: the system is paging to disk, a common cause of "
+                         "whole-machine sluggishness.")
+    except Exception as e:
+        lines.append(f"Memory: unavailable ({e})")
+    try:
+        d1 = psutil.disk_io_counters()
+        time.sleep(1.0)
+        d2 = psutil.disk_io_counters()
+        if d1 and d2:
+            rmb = round((d2.read_bytes - d1.read_bytes)/1024**2, 2)
+            wmb = round((d2.write_bytes - d1.write_bytes)/1024**2, 2)
+            line = f"Disk I/O: read {rmb} MB/s, write {wmb} MB/s"
+            busy = None
+            if hasattr(d2, "busy_time") and hasattr(d1, "busy_time"):
+                busy = d2.busy_time - d1.busy_time  # ms busy in ~1000 ms
+                line += f", ~{min(100, round(busy/10.0))}% active"
+            lines.append(line)
+            if (busy is not None and busy >= 800) or (rmb + wmb) >= 50:
+                lines.append("  -> Disk is a bottleneck: heavy read/write right now. This makes the "
+                             "whole machine feel slow even when CPU and RAM look fine (the dashboard "
+                             "does not track disk I/O).")
+    except Exception as e:
+        lines.append(f"Disk I/O: unavailable ({e})")
+    try:
+        for p in psutil.process_iter(['pid', 'name']):
+            try:
+                p.cpu_percent(None)
+            except Exception:
+                pass
+        time.sleep(0.6)
+        rows = []
+        for p in psutil.process_iter(['pid', 'name', 'memory_percent']):
+            try:
+                rows.append((p.info.get('name') or '?', p.info.get('pid'),
+                             round(p.cpu_percent(None), 1),
+                             round(p.info.get('memory_percent') or 0.0, 1)))
+            except Exception:
+                continue
+        top_cpu = sorted(rows, key=lambda r: r[2], reverse=True)[:5]
+        top_mem = sorted(rows, key=lambda r: r[3], reverse=True)[:5]
+        lines.append("Top CPU: " + ", ".join(f"{n} (PID {pid}) {c}%" for n, pid, c, m in top_cpu))
+        lines.append("Top RAM: " + ", ".join(f"{n} (PID {pid}) {m}%" for n, pid, c, m in top_mem))
+    except Exception as e:
+        lines.append(f"Top processes: unavailable ({e})")
+    try:
+        hung = _not_responding_pids()
+        if hung:
+            lines.append(f"Not Responding windows: {len(hung)} (PIDs {sorted(hung)[:10]})")
+    except Exception:
+        pass
+    try:
+        up = time.time() - psutil.boot_time()
+        lines.append(f"Uptime: {int(up//3600)}h {int((up%3600)//60)}m; total processes: {len(psutil.pids())}")
+    except Exception:
+        pass
+    return "COMPLETED", "\n".join(lines)
 
 
 def _reboot_system():
@@ -209,6 +419,10 @@ def handle_commands(client, agent_id, commands):
             status, output = _kill_process(payload.get("pid"))
         elif ctype == "REBOOT_SYSTEM":
             status, output = _reboot_system()
+        elif ctype == "DIAGNOSE_SYSTEM":
+            status, output = _diagnose_system()
+        elif ctype == "UPDATE_AGENT":
+            status, output = _handle_update_command(client, agent_id, cid)
         elif ctype in ("SERVICE_START", "SERVICE_STOP", "SERVICE_RESTART", "SERVICE_STATUS"):
             status, output = _service_action(ctype, payload.get("command_str"))
         else:
@@ -239,6 +453,7 @@ def run_agent():
 
         print(f"[*] Starting telemetry collection loop (Interval: {METRIC_INTERVAL_SECONDS}s)...")
         last_inventory = 0
+        last_update_check = time.time()
         
         while True:
             try:
@@ -252,12 +467,23 @@ def run_agent():
                 pending = data.get("pending_commands", [])
                 if pending:
                     handle_commands(client, agent_id, pending)
+                _maybe_update(data.get("latest_agent_version"))
                 
                 print(f"[Telemetry Sent] CPU: {metrics['cpu_percent']}% | RAM: {metrics['ram_percent']}% | Status: {status_ack}")
             except Exception as e:
                 print(f"[!] Error sending telemetry: {e}")
             
             now = time.time()
+            if now - last_update_check > UPDATE_CHECK_INTERVAL:
+                last_update_check = now
+                try:
+                    vr = client.get(f"{SERVER_URL}/version", timeout=10.0)
+                    if vr.status_code == 200:
+                        _maybe_update(vr.json().get("version"))
+                except SystemExit:
+                    raise
+                except Exception:
+                    pass
             if now - last_inventory > INVENTORY_INTERVAL:
                 try:
                     inv = collect_inventory()

@@ -115,6 +115,9 @@ export default function App() {
   const [appMonState, setAppMonState] = useState('all');
   const [appAnalysis, setAppAnalysis] = useState(null);
   const [analyzingApp, setAnalyzingApp] = useState(false);
+  const [diagnosis, setDiagnosis] = useState(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [pushingUpdate, setPushingUpdate] = useState(false);
   const [chartRange, setChartRange] = useState('live');
   const [historyData, setHistoryData] = useState([]);
   const [networkDevices, setNetworkDevices] = useState([]);
@@ -134,6 +137,7 @@ export default function App() {
   const [assetCoverage, setAssetCoverage] = useState(null);
   const [assetModal, setAssetModal] = useState(null);
   const [invAssetTab, setInvAssetTab] = useState('BOTH');
+  const [assetAutoSync, setAssetAutoSync] = useState(() => { try { return localStorage.getItem('assetAutoSync') === '1'; } catch (e) { return false; } });
   const [unregFilter, setUnregFilter] = useState('ALL');
   const [storageDrives, setStorageDrives] = useState([]);
   const [incidents, setIncidents] = useState([]);
@@ -438,6 +442,12 @@ export default function App() {
   const deleteAsset = async (id) => {
     try { await axios.delete(`${API_BASE}/assets/${id}`, authHdr()); await fetchAssets(); await fetchCoverage(); } catch (e) {}
   };
+
+  useEffect(() => {
+    if (!assetAutoSync || !token) return;
+    const t = setInterval(() => { syncAssets(); }, 60000);
+    return () => clearInterval(t);
+  }, [assetAutoSync, token]);
   const exportAssets = async () => {
     try {
       const r = await axios.get(`${API_BASE}/assets/export`, { ...authHdr(), responseType: 'blob' });
@@ -790,6 +800,33 @@ export default function App() {
     } catch (err) {
       setConsoleOutput(`[ERROR] ${err.message}`);
       setIsExecutingCmd(false);
+    }
+  };
+
+  const pushAgentUpdate = async () => {
+    if (!hasPerm('wol.manage')) return;
+    if (!window.confirm('Push the latest agent version to ALL agents now?\n\nEach PC will download the update and restart its agent within ~10 seconds.')) return;
+    setPushingUpdate(true);
+    try {
+      const res = await axios.post(`${API_BASE}/agents/push-update`, {}, authHdr());
+      showToast(`Update pushed to ${res.data.agents} agent(s) \u2014 target v${res.data.latest_version}.`);
+    } catch (e) {
+      showToast(`[!] Push failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setPushingUpdate(false);
+    }
+  };
+
+  const runDiagnose = async () => {
+    if (!selectedMachine) return;
+    setDiagnosing(true); setDiagnosis(null);
+    try {
+      const res = await axios.post(`${API_BASE}/agents/machines/${selectedMachine.id}/diagnose`, {}, authHdr());
+      setDiagnosis(res.data);
+    } catch (e) {
+      showToast(`[!] Diagnosis failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setDiagnosing(false);
     }
   };
 
@@ -1643,6 +1680,102 @@ export default function App() {
             </div>
           )}
 
+          {/* 6a. System Health Diagnosis - why is it slow / hanging */}
+          {selectedMachine && (
+            <div className="bg-[#131d31] border border-[#1e293b] rounded-xl overflow-hidden shadow-sm">
+              <div className="p-4 border-b border-[#1e293b] flex flex-col md:flex-row justify-between items-start md:items-center gap-3 bg-[#0f172a]/50">
+                <div>
+                  <h3 className="font-semibold text-white text-sm flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-rose-400" /> System Health Diagnosis &mdash; {selectedMachine.hostname}
+                  </h3>
+                  <p className="text-[11px] text-slate-400 mt-1">Finds why a node feels slow or hangs &mdash; including causes the overview misses (disk I/O, per-core load, hung apps).</p>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button onClick={runDiagnose} disabled={diagnosing || !hasPerm('incidents.analyze')}
+                    className="bg-rose-700 hover:bg-rose-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50 whitespace-nowrap">
+                    {diagnosing ? 'Diagnosing...' : '\U0001FA7A Diagnose Slowness'}
+                  </button>
+                  <button onClick={() => handleExecuteRemoteAction('DIAGNOSE_SYSTEM')} disabled={isExecutingCmd || !hasPerm('remote_ops.execute')}
+                    className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50 whitespace-nowrap">
+                    {isExecutingCmd ? 'Scanning...' : '⚡ Live deep scan'}
+                  </button>
+                </div>
+              </div>
+              {diagnosis && (
+                <div className="px-5 py-4 space-y-3">
+                  <div className="flex flex-wrap gap-2 text-[11px]">
+                    <span className="px-2 py-0.5 rounded bg-[#0f172a] text-slate-300 border border-[#1e293b]">CPU {diagnosis.host?.cpu ?? '—'}%</span>
+                    <span className="px-2 py-0.5 rounded bg-[#0f172a] text-slate-300 border border-[#1e293b]">RAM {diagnosis.host?.ram ?? '—'}%</span>
+                    <span className="px-2 py-0.5 rounded bg-[#0f172a] text-slate-300 border border-[#1e293b]">Disk {diagnosis.host?.disk ?? '—'}%</span>
+                    <span className="px-2 py-0.5 rounded bg-[#0f172a] text-slate-400 border border-[#1e293b]">{diagnosis.process_count ?? 0} processes</span>
+                  </div>
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-rose-300 font-semibold mb-1">AI Root Cause</div>
+                    <p className="text-sm text-slate-200">{diagnosis.root_cause?.probable_cause}</p>
+                    {diagnosis.root_cause?.observed_facts?.length > 0 && (
+                      <ul className="mt-1 list-disc list-inside text-xs text-slate-400 space-y-0.5">
+                        {diagnosis.root_cause.observed_facts.map((f, i) => <li key={i}>{f}</li>)}
+                      </ul>
+                    )}
+                    <div className="text-[10px] text-slate-500 mt-1">engine: {diagnosis.root_cause?.model_name}</div>
+                  </div>
+                  {diagnosis.findings?.length > 0 && (
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400 font-semibold mb-1">Findings</div>
+                      <div className="space-y-1.5">
+                        {diagnosis.findings.map((f, i) => {
+                          const c = f.severity === 'high' ? 'text-red-400 border-red-800 bg-red-950' : f.severity === 'medium' ? 'text-amber-400 border-amber-800 bg-amber-950' : 'text-slate-300 border-slate-700 bg-slate-800';
+                          return (
+                            <div key={i} className="flex items-start gap-2">
+                              <span className={`mt-0.5 px-2 py-0.5 rounded text-[10px] font-semibold border ${c}`}>{(f.severity || '').toUpperCase()}</span>
+                              <div><p className="text-sm text-slate-200">{f.title}</p><p className="text-xs text-slate-500">{f.detail}</p></div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-rose-300 font-semibold mb-1">Suggested Fixes ({diagnosis.fixes?.length || 0}) &mdash; review, then Apply</div>
+                    {(!diagnosis.fixes || diagnosis.fixes.length === 0) && <p className="text-xs text-slate-500">No stored signal explains the slowness. Run a Live deep scan to measure disk I/O and per-core load.</p>}
+                    <div className="space-y-2">
+                      {(diagnosis.fixes || []).map((fx, i) => {
+                        const sev = fx.severity === 'high' ? 'text-red-400 border-red-800 bg-red-950' : fx.severity === 'medium' ? 'text-amber-400 border-amber-800 bg-amber-950' : 'text-slate-300 border-slate-700 bg-slate-800';
+                        const riskBadge = fx.risk === 'high' ? 'bg-red-900 text-red-300' : fx.risk === 'medium' ? 'bg-amber-900 text-amber-300' : 'bg-slate-700 text-slate-300';
+                        return (
+                          <div key={i} className="border border-[#1e293b] rounded-lg p-3 bg-[#131d31]">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${sev}`}>{(fx.severity || '').toUpperCase()}</span>
+                                  <span className="text-sm font-medium text-white">{fx.title}</span>
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${riskBadge}`}>risk: {fx.risk}</span>
+                                </div>
+                                <p className="text-xs text-slate-400 mt-1">{fx.rationale}</p>
+                                {fx.command_preview && <div className="text-[11px] font-mono text-emerald-300 mt-1">{fx.command_preview}</div>}
+                              </div>
+                              {fx.action && hasPerm('remote_ops.execute') && (
+                                <button onClick={() => { if (window.confirm(`Apply this fix on ${diagnosis.hostname}?\n\n${fx.title}`)) handleExecuteRemoteAction(fx.action.command_type, { pid: fx.action.pid, command_str: fx.action.command_str }); }}
+                                  disabled={isExecutingCmd}
+                                  className="shrink-0 bg-rose-700 hover:bg-rose-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50">Apply</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {(isExecutingCmd || (consoleOutput && consoleOutput.length > 0)) && (
+                    <pre className="mt-1 text-[11px] text-slate-300 bg-black/40 rounded p-2 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{consoleOutput}</pre>
+                  )}
+                </div>
+              )}
+              {!diagnosis && (
+                <div className="px-5 py-5 text-xs text-slate-500">Click <span className="text-rose-300">Diagnose Slowness</span> for an instant root-cause read from the latest telemetry, or <span className="text-slate-300">Live deep scan</span> to measure disk I/O and per-core load on the machine right now.</div>
+              )}
+            </div>
+          )}
+
           {/* 6b. Application Monitor (per-app state + why heavy) */}
           {isWidgetAllowed('taskManager') && appMonitor && (
             <div className="bg-[#131d31] border border-[#1e293b] rounded-xl overflow-hidden shadow-sm">
@@ -1782,6 +1915,13 @@ export default function App() {
                 <h3 className="font-semibold text-white text-sm flex items-center gap-2">
                   <Server className="w-4 h-4 text-slate-400" /> Infrastructure Node Inventory ({filteredMachines.length})
                 </h3>
+                {hasPerm('wol.manage') && (
+                  <button onClick={pushAgentUpdate} disabled={pushingUpdate}
+                    title="Download the latest agent to every PC and restart it (auto within ~10s)"
+                    className="bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap">
+                    <RefreshCw className="w-3.5 h-3.5" /> {pushingUpdate ? 'Pushing...' : 'Push update to all agents'}
+                  </button>
+                )}
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm text-slate-300">
@@ -2239,6 +2379,10 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button onClick={syncAssets} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Sync from Agents</button>
+              <button onClick={() => { const v = !assetAutoSync; setAssetAutoSync(v); try { localStorage.setItem('assetAutoSync', v ? '1' : '0'); } catch (e) {} if (v) syncAssets(); }}
+                className={`text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 border ${assetAutoSync ? 'bg-emerald-700 border-emerald-500 text-white' : 'bg-[#0f172a] border-[#1e293b] text-slate-400 hover:text-white'}`}>
+                <span className={`w-2 h-2 rounded-full ${assetAutoSync ? 'bg-emerald-300 animate-pulse' : 'bg-slate-500'}`}></span> Auto-Sync {assetAutoSync ? 'On' : 'Off'}
+              </button>
               <button onClick={() => setAssetModal({})} className="bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><UserPlus className="w-4 h-4" /> Add Asset</button>
               <button onClick={exportAssets} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><FileDown className="w-4 h-4" /> Export CSV</button>
             </div>
@@ -2265,7 +2409,7 @@ export default function App() {
                   <tr>
                     <th className="text-left px-3 py-3 sticky left-0 bg-[#0f172a]">#</th>
                     {ASSET_COLS.map(([k, label]) => (<th key={k} className="text-left px-3 py-3">{label}</th>))}
-                    <th className="text-left px-3 py-3">Edit</th>
+                    <th className="text-left px-3 py-3">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1e293b]">
@@ -2275,7 +2419,7 @@ export default function App() {
                     <tr key={a.id} className="hover:bg-[#0f172a]/40">
                       <td className="px-3 py-2 text-slate-500 sticky left-0 bg-[#131d31]">{idx + 1}</td>
                       {ASSET_COLS.map(([k]) => (<td key={k} className="px-3 py-2 text-slate-300">{a[k] || '\u2014'}</td>))}
-                      <td className="px-3 py-2"><button onClick={() => setAssetModal({ ...a })} className="text-teal-400 hover:text-teal-300"><Sliders className="w-3.5 h-3.5" /></button></td>
+                      <td className="px-3 py-2"><div className="flex items-center gap-3"><button onClick={() => setAssetModal({ ...a })} title="Edit" className="text-teal-400 hover:text-teal-300"><Sliders className="w-3.5 h-3.5" /></button><button onClick={() => { if (window.confirm(`Remove asset ${a.asset_no || a.host_name || a.id} from the register?`)) deleteAsset(a.id); }} title="Remove" className="text-rose-400 hover:text-rose-300"><Trash2 className="w-3.5 h-3.5" /></button></div></td>
                     </tr>
                   ))}
                 </tbody>

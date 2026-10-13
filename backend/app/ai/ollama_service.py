@@ -228,3 +228,63 @@ In 2-4 sentences explain the most likely root cause of the resource pressure and
     except Exception as e:
         print(f"[!] App-health LLM fallback triggered: {e}")
         return _fallback_app_health(context)
+
+
+def _fallback_slowness(context):
+    """Deterministic root-cause narrative for host slowness when the local LLM is
+    unavailable, built from the findings the backend already computed."""
+    findings = context.get("findings", [])
+    host = context.get("host", {})
+    hostname = context.get("hostname", "this node")
+    if not findings:
+        return {
+            "probable_cause": f"Stored metrics for {hostname} look normal "
+                              f"(CPU {host.get('cpu')}%, RAM {host.get('ram')}%, Disk {host.get('disk')}%). "
+                              "The dashboard does not track disk I/O or per-core load, so run a Live deep "
+                              "scan to measure what is actually stressing the machine right now.",
+            "observed_facts": [], "model_name": "deterministic",
+        }
+    facts = [f.get("title") for f in findings[:6] if f.get("title")]
+    lead = findings[0]
+    cause = (f"The most likely cause of slowness on {hostname} is: {lead.get('title')}. "
+             f"{lead.get('detail', '')}").strip()
+    return {"probable_cause": cause, "observed_facts": facts, "model_name": "deterministic"}
+
+
+def analyze_slowness_with_ai(context):
+    """Short plain-language root cause for why a host is slow/hanging, from the
+    local LLM with a deterministic fallback. The executable fixes are built by the
+    backend (trusted), not the model - this only narrates the cause."""
+    findings = context.get("findings", [])
+    if not findings:
+        return _fallback_slowness(context)
+    host = context.get("host", {})
+    prompt = f"""You are an IT operations assistant triaging why a computer is slow or hanging.
+Host {context.get('hostname')} ({context.get('os_name')}) readings: CPU {host.get('cpu')}%, RAM {host.get('ram')}%, Disk {host.get('disk')}%.
+Detected findings (JSON):
+{json.dumps(findings)[:2000]}
+
+In 2-4 sentences explain the single most likely root cause of the slowness and which process/resource is responsible. Be specific and practical. Do NOT invent commands. Return ONLY JSON:
+{{"probable_cause": "2-4 sentence explanation", "observed_facts": ["fact", "fact"]}}"""
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(
+                f"{settings.OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.2, "num_predict": 350},
+                },
+            )
+            response.raise_for_status()
+            result = json.loads(response.json().get("response", "{}"))
+            if not result.get("probable_cause"):
+                return _fallback_slowness(context)
+            result.setdefault("observed_facts", [])
+            result["model_name"] = settings.OLLAMA_MODEL
+            return result
+    except Exception as e:
+        print(f"[!] Slowness LLM fallback triggered: {e}")
+        return _fallback_slowness(context)
