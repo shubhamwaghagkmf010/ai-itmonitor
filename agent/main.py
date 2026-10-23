@@ -1,5 +1,6 @@
 import time
 import json
+import ssl
 import uuid
 import os
 import sys
@@ -20,6 +21,66 @@ from agent.collectors.inventory import collect_inventory
 
 CONFIG_FILE = Path(__file__).parent / "agent_config.json"
 SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8000/api/v1/agents")
+CA_CERT_PATH = Path(__file__).parent / "ca_cert.crt"
+
+
+def _build_ssl_context():
+    """Trust context for all agent HTTP calls: the normal public CA trust store
+    (so a future real domain with a Let's Encrypt certificate just works, with no
+    agent change needed) PLUS our own internal CA, bundled as ca_cert.crt, which
+    vouches for THIS deployment's private-IP certificate (no public CA will ever
+    certify a private IP). If ca_cert.crt is missing or unreadable this silently
+    falls back to the public trust store only - never raises."""
+    ctx = ssl.create_default_context()
+    try:
+        if CA_CERT_PATH.exists():
+            ctx.load_verify_locations(cafile=str(CA_CERT_PATH))
+    except Exception as e:
+        print(f"[tls] could not load bundled CA cert (continuing without it): {e}")
+    return ctx
+
+
+def _migrate_to_https(client, agent_id, config, hint):
+    """One-time, verified move from the legacy HTTP endpoint to the HTTPS one the
+    server advertises. Only switches after a real request to the hinted URL
+    succeeds, and remembers the choice in agent_config.json so it survives
+    restarts. Never used for the active registration id - callers keep using the
+    current SERVER_URL until this returns a new one."""
+    global SERVER_URL
+    if not hint or hint == SERVER_URL or not hint.startswith("https://"):
+        return
+    try:
+        r = client.get(f"{hint}/version", timeout=10.0)
+        if r.status_code == 200:
+            print(f"[tls] HTTPS endpoint verified reachable - switching to {hint}")
+            SERVER_URL = hint
+            config["server_url"] = hint
+            config["server_url_failures"] = 0
+            save_config(config)
+    except Exception as e:
+        print(f"[tls] HTTPS endpoint not yet reachable ({e}); staying on {SERVER_URL} for now")
+
+
+def _note_request_outcome(config, ok):
+    """After migrating to HTTPS, revert to the original SERVER_URL if several
+    consecutive requests fail - so a misconfigured or unreachable HTTPS path can
+    never strand an agent that was working fine over HTTP."""
+    global SERVER_URL
+    if "server_url" not in config:
+        return
+    if ok:
+        config["server_url_failures"] = 0
+        return
+    config["server_url_failures"] = config.get("server_url_failures", 0) + 1
+    if config["server_url_failures"] >= 5:
+        fallback = config.get("original_server_url") or os.getenv(
+            "SERVER_URL", "http://127.0.0.1:8000/api/v1/agents")
+        print(f"[tls] {config['server_url_failures']} consecutive failures on {SERVER_URL} "
+              f"- reverting to {fallback}")
+        SERVER_URL = fallback
+        config.pop("server_url", None)
+        config["server_url_failures"] = 0
+    save_config(config)
 METRIC_INTERVAL_SECONDS = int(os.getenv("METRIC_INTERVAL", "10"))
 INVENTORY_INTERVAL = int(os.getenv("INVENTORY_INTERVAL", "1800"))  # 30 min
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", "")
@@ -54,7 +115,7 @@ def _download_update():
         target = "windows" if platform.system() == "Windows" else "linux"
         url = f"{SERVER_URL}/download?os={target}"
         headers = {"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {}
-        with httpx.Client(headers=headers) as c:
+        with httpx.Client(headers=headers, verify=_build_ssl_context()) as c:
             r = c.get(url, timeout=90.0)
             r.raise_for_status()
             content = r.content
@@ -438,12 +499,18 @@ def handle_commands(client, agent_id, commands):
 
 
 def run_agent():
+    global SERVER_URL
     _start_wol_relay()
     print("==================================================")
     print("      AI-ITMonitor Cross-Platform Agent           ")
     print("==================================================")
     
-    with httpx.Client(headers={"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {}) as client:
+    with httpx.Client(headers={"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {},
+                     verify=_build_ssl_context()) as client:
+        config = load_config()
+        config.setdefault("original_server_url", SERVER_URL)
+        if config.get("server_url"):
+            SERVER_URL = config["server_url"]
         agent_id = register_agent(client)
         
         while not agent_id:
@@ -463,15 +530,18 @@ def run_agent():
                 res = client.post(f"{SERVER_URL}/metrics", json=payload, timeout=10.0)
                 res.raise_for_status()
                 data = res.json()
+                _note_request_outcome(config, True)
                 status_ack = data.get("machine_status", "UNKNOWN")
                 pending = data.get("pending_commands", [])
                 if pending:
                     handle_commands(client, agent_id, pending)
                 _maybe_update(data.get("latest_agent_version"))
+                _migrate_to_https(client, agent_id, config, data.get("https_hint"))
                 
                 print(f"[Telemetry Sent] CPU: {metrics['cpu_percent']}% | RAM: {metrics['ram_percent']}% | Status: {status_ack}")
             except Exception as e:
                 print(f"[!] Error sending telemetry: {e}")
+                _note_request_outcome(config, False)
             
             now = time.time()
             if now - last_update_check > UPDATE_CHECK_INTERVAL:

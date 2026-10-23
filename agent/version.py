@@ -6,4 +6,4 @@
 #   * within ~10s via the /metrics heartbeat response, and
 #   * as an hourly fallback via GET /agents/version.
 # The launcher (run.bat) then swaps in the new code and restarts the agent.
-AGENT_VERSION = "1.1.0"
+AGENT_VERSION = "1.2.1"

@@ -35,3 +35,4 @@ backend/app/services/oui_cache.csv
 *.zip
 backend/agent_dist/
 node_modules/
+certs/

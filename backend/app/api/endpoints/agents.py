@@ -196,7 +196,8 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
     db.commit()
 
     return {"status": "ingested", "machine_status": machine.status.value,
-            "pending_commands": cmds, "latest_agent_version": _latest_agent_version()}
+            "pending_commands": cmds, "latest_agent_version": _latest_agent_version(),
+            "https_hint": settings.PUBLIC_HTTPS_BASE_URL}
 
 @router.get("/machines")
 def get_machines(db: Session = Depends(get_db), current_user: User = Depends(require_permission("telemetry.view"))):

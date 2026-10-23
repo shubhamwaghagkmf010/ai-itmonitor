@@ -30,6 +30,14 @@ REM modify the agent; standard Users (S-1-5-32-545) get read+execute only. This
 REM stops a normal user or user-level malware from tampering with the agent.
 icacls "%INSTALL_DIR%" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX" >nul 2>&1
 
+REM Trust our internal root CA locally-machine-wide, so this PC's browsers and
+REM Windows itself accept the server's HTTPS certificate without a warning (the
+REM agent's own HTTPS calls always work regardless - this step is only for
+REM humans using a browser on this PC). Safe to re-run; a duplicate is a no-op.
+if exist "%INSTALL_DIR%\agent\ca_cert.crt" (
+  certutil -addstore -f "ROOT" "%INSTALL_DIR%\agent\ca_cert.crt" >nul 2>&1
+)
+
 echo [*] Registering auto-start task "AIITMonitorAgent" ^(points to the installed copy^)...
 schtasks /create /tn "AIITMonitorAgent" /tr "\"%INSTALL_DIR%\run.bat\"" /sc onstart /ru SYSTEM /rl highest /f >nul 2>&1
 if !errorLevel! equ 0 (

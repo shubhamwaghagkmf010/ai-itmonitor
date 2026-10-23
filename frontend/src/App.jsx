@@ -13,7 +13,10 @@ import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
 } from 'recharts';
 
-const API_BASE = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000/api/v1`;
+// Same-origin by default: nginx proxies /api/ to the backend on whichever
+// address the page was loaded from (IP or, once configured, a real domain) -
+// no code change is ever needed when the access URL changes.
+const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
 const WIDGET_LABELS = {
   kpiCards: "Top Summary KPI Cards",
@@ -671,23 +674,54 @@ export default function App() {
     if (!inputMsg.trim() || chatLoading) return;
     const userText = inputMsg;
     setInputMsg('');
-    setChatMessages(prev => [...prev, { sender: 'user', text: userText }]);
+    // Push an empty bot bubble right away and fill it in as tokens stream in -
+    // the reply starts appearing in ~1-2s instead of one long silent wait.
+    setChatMessages(prev => [...prev, { sender: 'user', text: userText }, { sender: 'bot', text: '' }]);
     setChatLoading(true);
 
     try {
-      const res = await axios.post(`${API_BASE}/ai/chat`, {
-        message: userText,
-        machine_context: selectedMachine ? {
-          hostname: selectedMachine.hostname,
-          os: selectedMachine.os_name,
-          user: selectedMachine.logged_in_user,
-          cpu: metricsHistory.length > 0 ? metricsHistory[metricsHistory.length - 1].cpu_percent : 0
-        } : null
-      }, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(`${API_BASE}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          message: userText,
+          machine_context: selectedMachine ? {
+            hostname: selectedMachine.hostname,
+            os: selectedMachine.os_name,
+            user: selectedMachine.logged_in_user,
+            cpu: metricsHistory.length > 0 ? metricsHistory[metricsHistory.length - 1].cpu_percent : 0
+          } : null
+        })
+      });
+      if (!res.ok || !res.body) throw new Error('stream unavailable');
 
-      setChatMessages(prev => [...prev, { sender: 'bot', text: res.data.reply || "Analysis complete." }]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let acc = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        setChatMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { sender: 'bot', text: acc };
+          return copy;
+        });
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }
+      if (!acc.trim()) {
+        setChatMessages(prev => {
+          const copy = [...prev];
+          copy[copy.length - 1] = { sender: 'bot', text: "Analysis complete." };
+          return copy;
+        });
+      }
     } catch {
-      setChatMessages(prev => [...prev, { sender: 'bot', text: "AI Assistant temporarily busy. Please retry." }]);
+      setChatMessages(prev => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { sender: 'bot', text: "AI Assistant temporarily busy. Please retry." };
+        return copy;
+      });
     } finally {
       setChatLoading(false);
       chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -2666,7 +2700,7 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-                {chatLoading && <div className="text-xs text-teal-400 animate-pulse">AI is analyzing context...</div>}
+                {chatLoading && chatMessages[chatMessages.length - 1]?.text === '' && <div className="text-xs text-teal-400 animate-pulse">AI is thinking...</div>}
                 <div ref={chatEndRef} />
               </div>
 

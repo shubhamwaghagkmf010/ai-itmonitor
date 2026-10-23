@@ -62,7 +62,7 @@ Return ONLY a JSON object matching this schema:
                     "format": "json",
                     "options": {
                         "temperature": 0.1,
-                        "num_predict": 200
+                        "num_predict": 160
                     }
                 }
             )
@@ -123,7 +123,7 @@ def analyze_diagnostics_with_ai(context: Dict[str, Any]) -> Dict[str, Any]:
         return generate_fallback_diagnostics(context)
 
     prompt = f"""You are an IT operations assistant. A diagnostic scan of host {context.get('hostname')} ({context.get('os_name')}) found these issues (JSON):
-{json.dumps(findings)[:2200]}
+{json.dumps(findings)[:1500]}
 
 Current readings: CPU {context.get('cpu_percent')}%, RAM {context.get('ram_percent')}%, Disk {context.get('disk_percent')}%.
 
@@ -146,7 +146,7 @@ Explain the most likely root cause and give concrete fix steps (exact {('PowerSh
                     "prompt": prompt,
                     "stream": False,
                     "format": "json",
-                    "options": {"temperature": 0.1, "num_predict": 400},
+                    "options": {"temperature": 0.1, "num_predict": 260},
                 },
             )
             response.raise_for_status()
@@ -202,10 +202,10 @@ def analyze_app_health_with_ai(context: Dict[str, Any]) -> Dict[str, Any]:
     host = context.get("host", {})
     prompt = f"""You are an IT operations assistant. On host {context.get('hostname')} ({context.get('os_name')}) the current readings are CPU {host.get('cpu')}%, RAM {host.get('ram')}%, Disk {host.get('disk')}%.
 These applications are consuming the most resources (JSON):
-{json.dumps(apps)[:2000]}
+{json.dumps(apps)[:1200]}
 
-In 2-4 sentences explain the most likely root cause of the resource pressure and which application is responsible. Be specific and practical. Do NOT invent commands. Return ONLY JSON:
-{{"probable_cause": "2-4 sentence explanation", "observed_facts": ["fact", "fact"]}}"""
+In 1-2 short sentences explain the most likely root cause of the resource pressure and which application is responsible. Be specific and practical. Do NOT invent commands. Return ONLY JSON:
+{{"probable_cause": "<your 1-2 sentence explanation here>", "observed_facts": ["fact", "fact"]}}"""
     try:
         with httpx.Client(timeout=120.0) as client:
             response = client.post(
@@ -215,7 +215,7 @@ In 2-4 sentences explain the most likely root cause of the resource pressure and
                     "prompt": prompt,
                     "stream": False,
                     "format": "json",
-                    "options": {"temperature": 0.2, "num_predict": 350},
+                    "options": {"temperature": 0.2, "num_predict": 200},
                 },
             )
             response.raise_for_status()
@@ -262,10 +262,10 @@ def analyze_slowness_with_ai(context):
     prompt = f"""You are an IT operations assistant triaging why a computer is slow or hanging.
 Host {context.get('hostname')} ({context.get('os_name')}) readings: CPU {host.get('cpu')}%, RAM {host.get('ram')}%, Disk {host.get('disk')}%.
 Detected findings (JSON):
-{json.dumps(findings)[:2000]}
+{json.dumps(findings)[:1200]}
 
-In 2-4 sentences explain the single most likely root cause of the slowness and which process/resource is responsible. Be specific and practical. Do NOT invent commands. Return ONLY JSON:
-{{"probable_cause": "2-4 sentence explanation", "observed_facts": ["fact", "fact"]}}"""
+In 1-2 short sentences explain the single most likely root cause of the slowness and which process/resource is responsible. Be specific and practical. Do NOT invent commands. Return ONLY JSON:
+{{"probable_cause": "<your 1-2 sentence explanation here>", "observed_facts": ["fact", "fact"]}}"""
     try:
         with httpx.Client(timeout=120.0) as client:
             response = client.post(
@@ -275,7 +275,7 @@ In 2-4 sentences explain the single most likely root cause of the slowness and w
                     "prompt": prompt,
                     "stream": False,
                     "format": "json",
-                    "options": {"temperature": 0.2, "num_predict": 350},
+                    "options": {"temperature": 0.2, "num_predict": 200},
                 },
             )
             response.raise_for_status()

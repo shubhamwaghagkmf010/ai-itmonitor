@@ -10,7 +10,7 @@ services:
       POSTGRES_PASSWORD: ai_itmonitor_password
       POSTGRES_DB: ai_itmonitor_db
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
 
@@ -29,6 +29,8 @@ services:
       SCAN_SUBNET: "${SCAN_SUBNET:-}"
       OLLAMA_BASE_URL: "http://ollama:11434"
       OLLAMA_MODEL: "qwen2.5:0.5b"
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     depends_on:
@@ -63,6 +65,10 @@ services:
     restart: always
     ports:
       - "5173:80"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
     depends_on:
       - backend
 

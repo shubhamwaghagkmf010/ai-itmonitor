@@ -36,49 +36,56 @@ def _fallback(user_prompt: str, machines, incidents) -> str:
             "(Local AI engine is offline right now, so this is a summarised answer.)")
 
 
-def query_ai_assistant(user_prompt: str, db: Session, machine_context: Optional[dict] = None) -> str:
-    """AI SRE Copilot: answers grounded in this environment's live telemetry, and
-    returns ChatGPT-style formatted guidance with fenced, copyable commands."""
-    machines = db.query(Machine).all()
-    incidents = db.query(Incident).order_by(Incident.created_at.desc()).limit(5).all()
+def _build_chat_context(db: Session, machine_context: Optional[dict] = None):
+    """Shared grounding data + system prompt for both the one-shot and the
+    streaming chat path, so they never drift apart.
 
-    machine_summary = [
-        {"host": m.hostname, "os": m.os_name, "status": m.status.value,
-         "ip": m.ip_address, "user": m.logged_in_user}
-        for m in machines
-    ]
-    incident_summary = []
+    The prompt is built as compact plain text, not JSON - on this CPU-only
+    deployment, PROMPT PREFILL (not generation) turned out to be the dominant
+    cost (~11 tok/s observed vs ~6 tok/s generation): a verbose JSON dump of
+    the fleet pushed the prompt past 900 tokens, most of it punctuation
+    (braces/quotes/field names) carrying no extra information. Plain
+    "key: value" lines say the same thing in roughly half the tokens."""
+    machines = db.query(Machine).all()
+    incidents = db.query(Incident).order_by(Incident.created_at.desc()).limit(3).all()
+
+    machine_lines = "\n".join(
+        f"- {m.hostname} | {m.os_name} | {m.status.value} | {m.ip_address or 'no-ip'} | user:{m.logged_in_user or 'none'}"
+        for m in machines[:20]
+    ) or "(none registered yet)"
+
+    incident_lines = []
     for inc in incidents:
         rca = db.query(AIAnalysis).filter(AIAnalysis.incident_id == inc.id).first()
-        incident_summary.append({
-            "code": inc.incident_code,
-            "host": inc.machine.hostname if inc.machine else "N/A",
-            "title": inc.title,
-            "severity": inc.severity.value,
-            "status": inc.status.value,
-            "rca": rca.probable_cause if rca else "Pending",
-        })
+        rca_text = (rca.probable_cause[:140] if rca and rca.probable_cause else "pending")
+        host = inc.machine.hostname if inc.machine else "N/A"
+        incident_lines.append(
+            f"- {inc.incident_code} [{host}] {inc.severity.value}/{inc.status.value}: {inc.title} - {rca_text}")
+    incident_block = "\n".join(incident_lines) or "(none)"
 
-    focused = f"\nCurrently viewed node: {json.dumps(machine_context)}" if machine_context else ""
+    focused = ""
+    if machine_context:
+        focused = "\nCurrently viewed node: " + ", ".join(
+            f"{k}={v}" for k, v in machine_context.items())
 
-    system_prompt = f"""You are the AI Diagnostic SRE Copilot built into AI-ITMonitor. You have DIRECT ACCESS to this environment's live monitoring data below - treat it as ground truth.
+    system_prompt = f"""You are the AI SRE Copilot built into AI-ITMonitor. The data below is live - treat it as ground truth.
 
-LIVE INFRASTRUCTURE STATE
-Monitored nodes ({len(machines)}): {json.dumps(machine_summary)}
-Recent incidents: {json.dumps(incident_summary)}{focused}
+NODES ({len(machines)}):
+{machine_lines}
 
-HOW TO ANSWER
-- For questions about the monitored machines, incidents, logged-in users, CPU/RAM/disk or status, answer from the LIVE INFRASTRUCTURE STATE above - name the host and give the numbers. If it is not in the data, say you do not have that data yet.
-- For "how do I fix/troubleshoot" questions, give short numbered steps.
-- ALWAYS put any terminal command inside a fenced code block tagged with its shell, for example:
+RECENT INCIDENTS:
+{incident_block}{focused}
+
+Answer questions about these nodes/incidents using the data above - name the host and give the numbers; say you don't have it if it's missing. For "how do I fix" questions give short numbered steps. Keep answers to 3-5 sentences/bullets - this is a small local model, brevity keeps it fast. Put any terminal command in a fenced code block with its shell, e.g.:
 ```powershell
 Get-Process | Sort-Object CPU -Descending | Select-Object -First 5
-```
-```bash
-df -h
-```
-- Be concise and practical; prefer the exact commands over long prose."""
+```"""
+    return system_prompt, machines, incidents
 
+
+def query_ai_assistant(user_prompt: str, db: Session, machine_context: Optional[dict] = None) -> str:
+    """Non-streaming variant, kept for any caller that needs one plain string."""
+    system_prompt, machines, incidents = _build_chat_context(db, machine_context)
     try:
         with httpx.Client(timeout=120.0) as client:
             res = client.post(
@@ -87,7 +94,7 @@ df -h
                     "model": settings.OLLAMA_MODEL,
                     "prompt": f"{system_prompt}\n\nUser: {user_prompt}\nAssistant:",
                     "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 512},
+                    "options": {"temperature": 0.3, "num_predict": 320},
                 },
             )
             res.raise_for_status()
@@ -96,3 +103,44 @@ df -h
     except Exception as e:
         print(f"[!] Chat LLM fallback triggered: {e}")
         return _fallback(user_prompt, machines, incidents)
+
+
+def stream_ai_assistant(user_prompt: str, db: Session, machine_context: Optional[dict] = None):
+    """AI SRE Copilot, streamed token-by-token as the local model generates them -
+    the reply starts appearing in ~1-2s instead of waiting for the whole answer,
+    which is what actually made the chat feel slow on this CPU-only deployment
+    (the model itself is already the smallest practical size). Falls back to one
+    complete message if the local engine is unreachable."""
+    system_prompt, machines, incidents = _build_chat_context(db, machine_context)
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            with client.stream(
+                "POST",
+                f"{settings.OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": settings.OLLAMA_MODEL,
+                    "prompt": f"{system_prompt}\n\nUser: {user_prompt}\nAssistant:",
+                    "stream": True,
+                    "options": {"temperature": 0.3, "num_predict": 320},
+                },
+            ) as res:
+                res.raise_for_status()
+                got_any = False
+                for line in res.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    chunk = obj.get("response", "")
+                    if chunk:
+                        got_any = True
+                        yield chunk
+                    if obj.get("done"):
+                        break
+                if not got_any:
+                    yield _fallback(user_prompt, machines, incidents)
+    except Exception as e:
+        print(f"[!] Chat LLM stream fallback triggered: {e}")
+        yield _fallback(user_prompt, machines, incidents)
