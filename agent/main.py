@@ -85,6 +85,44 @@ METRIC_INTERVAL_SECONDS = int(os.getenv("METRIC_INTERVAL", "10"))
 INVENTORY_INTERVAL = int(os.getenv("INVENTORY_INTERVAL", "1800"))  # 30 min
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", "")
 
+
+def _agent_headers(token=None):
+    """Headers on every request: the shared enrolment key, a note that this agent can keep a
+    per-agent token, and that token once the server has issued one."""
+    headers = {"X-Agent-Token-Support": "1"}
+    if AGENT_API_KEY:
+        headers["X-Agent-Key"] = AGENT_API_KEY
+    if token:
+        headers["X-Agent-Token"] = token
+    return headers
+
+
+def _remember_token(client, token):
+    """Keeps the token the server issued: on disk for the next start, and on the live client."""
+    config = load_config()
+    config["agent_token"] = token
+    save_config(config)
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
+    client.headers["X-Agent-Token"] = token
+
+
+def _forget_identity(client):
+    """The server no longer accepts our token (it was reset or the machine re-enrolled). Drop the
+    cached identity so the agent registers again."""
+    config = load_config()
+    for key in ("agent_id", "agent_token", "registered_uid"):
+        config.pop(key, None)
+    save_config(config)
+    client.headers.pop("X-Agent-Token", None)
+
+
+def _token_rejected(exc):
+    resp = getattr(exc, "response", None)
+    return resp is not None and resp.status_code == 401 and "agent token" in (resp.text or "").lower()
+
 # --- Self-update -----------------------------------------------------------
 # The server always serves the latest agent code at /download and advertises the
 # latest version in every /metrics heartbeat (and via GET /version). When a newer
@@ -114,7 +152,7 @@ def _download_update():
     try:
         target = "windows" if platform.system() == "Windows" else "linux"
         url = f"{SERVER_URL}/download?os={target}"
-        headers = {"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {}
+        headers = _agent_headers(load_config().get("agent_token"))
         with httpx.Client(headers=headers, verify=_build_ssl_context()) as c:
             r = c.get(url, timeout=90.0)
             r.raise_for_status()
@@ -223,12 +261,25 @@ def register_agent(client: httpx.Client) -> str:
         response.raise_for_status()
         data = response.json()
         agent_id = data["agent_id"]
+        if data.get("agent_token"):
+            config["agent_token"] = data["agent_token"]
+            client.headers["X-Agent-Token"] = data["agent_token"]
         config["agent_id"] = agent_id
         config["registered_uid"] = config["machine_uid"]
         config["hostname"] = system_info["hostname"]
         save_config(config)
+        try:
+            os.chmod(CONFIG_FILE, 0o600)  # it now holds the agent's token
+        except OSError:
+            pass
         print(f"[+] Successfully registered with Agent ID: {agent_id}")
         return agent_id
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 409:
+            print("[-] The server says this machine is already enrolled and active; waiting to retry")
+        else:
+            print(f"[-] Registration failed: {e}")
+        return None
     except Exception as e:
         print(f"[-] Registration failed: {e}")
         return None
@@ -335,6 +386,10 @@ def _kill_process(pid):
         pid = int(pid)
     except (TypeError, ValueError):
         return "FAILED", f"Invalid PID: {pid!r}"
+    if pid <= 1:
+        return "FAILED", f"Refusing to kill PID {pid}: system process"
+    if pid in (os.getpid(), os.getppid()):
+        return "FAILED", f"Refusing to kill PID {pid}: that is the monitoring agent itself"
     try:
         name = psutil.Process(pid).name()
     except Exception:
@@ -505,18 +560,20 @@ def run_agent():
     print("      AI-ITMonitor Cross-Platform Agent           ")
     print("==================================================")
     
-    with httpx.Client(headers={"X-Agent-Key": AGENT_API_KEY} if AGENT_API_KEY else {},
+    with httpx.Client(headers=_agent_headers(load_config().get("agent_token")),
                      verify=_build_ssl_context()) as client:
         config = load_config()
         config.setdefault("original_server_url", SERVER_URL)
         if config.get("server_url"):
             SERVER_URL = config["server_url"]
         agent_id = register_agent(client)
-        
+
         while not agent_id:
             print("[!] Retrying registration in 5 seconds...")
             time.sleep(5)
             agent_id = register_agent(client)
+        config = load_config()  # registration may have saved a new id/token
+        config.setdefault("original_server_url", SERVER_URL)
 
         print(f"[*] Starting telemetry collection loop (Interval: {METRIC_INTERVAL_SECONDS}s)...")
         last_inventory = 0
@@ -530,6 +587,9 @@ def run_agent():
                 res = client.post(f"{SERVER_URL}/metrics", json=payload, timeout=10.0)
                 res.raise_for_status()
                 data = res.json()
+                if data.get("agent_token"):  # issued once, when the server first sees a token-capable agent
+                    _remember_token(client, data["agent_token"])
+                    config["agent_token"] = data["agent_token"]
                 _note_request_outcome(config, True)
                 status_ack = data.get("machine_status", "UNKNOWN")
                 pending = data.get("pending_commands", [])
@@ -541,6 +601,16 @@ def run_agent():
                 print(f"[Telemetry Sent] CPU: {metrics['cpu_percent']}% | RAM: {metrics['ram_percent']}% | Status: {status_ack}")
             except Exception as e:
                 print(f"[!] Error sending telemetry: {e}")
+                if _token_rejected(e):
+                    print("[!] Server rejected the agent token; registering again")
+                    _forget_identity(client)
+                    agent_id = None
+                    while not agent_id:
+                        time.sleep(5)
+                        agent_id = register_agent(client)
+                    config = load_config()
+                    config.setdefault("original_server_url", SERVER_URL)
+                    continue
                 _note_request_outcome(config, False)
             
             now = time.time()

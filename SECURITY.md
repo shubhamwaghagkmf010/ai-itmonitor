@@ -17,6 +17,9 @@ within a few working days.
 - Rotate `SECRET_KEY` if it was ever the example value or has been shared: every issued token
   is invalidated by changing it.
 - Keep `backend/.env` readable by the service account only (`chmod 600`); the server warns otherwise.
+- Agents get a per-agent token when they enrol. Upgrade the whole fleet, then set `REQUIRE_AGENT_TOKEN=true`.
+  A reinstalled machine can enrol again once it has been silent for 5 minutes (at once if the old agent
+  presents its token); while the agent is live, a second enrolment is refused.
 - Terminate TLS in front of the API and dashboard.
 - Give the database and agent accounts least privilege.
 - Do not expose the API to an untrusted network; it can run remote actions.

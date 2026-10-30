@@ -838,7 +838,7 @@ export default function App() {
   };
 
   const pushAgentUpdate = async () => {
-    if (!hasPerm('wol.manage')) return;
+    if (!hasPerm('agents.manage')) return;
     if (!window.confirm('Push the latest agent version to ALL agents now?\n\nEach PC will download the update and restart its agent within ~10 seconds.')) return;
     setPushingUpdate(true);
     try {
@@ -1949,7 +1949,7 @@ export default function App() {
                 <h3 className="font-semibold text-white text-sm flex items-center gap-2">
                   <Server className="w-4 h-4 text-slate-400" /> Infrastructure Node Inventory ({filteredMachines.length})
                 </h3>
-                {hasPerm('wol.manage') && (
+                {hasPerm('agents.manage') && (
                   <button onClick={pushAgentUpdate} disabled={pushingUpdate}
                     title="Download the latest agent to every PC and restart it (auto within ~10s)"
                     className="bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap">
@@ -2007,7 +2007,7 @@ export default function App() {
                             >
                               {isSelected ? '✓ Inspecting' : 'Inspect'}
                             </button>
-                                                      {hasPerm('wol.manage') && (
+                                                      {hasPerm('agents.manage') && (
                               <button
                                 onClick={() => deleteMachine(m)}
                                 title="Remove this node (duplicate / decommissioned)"

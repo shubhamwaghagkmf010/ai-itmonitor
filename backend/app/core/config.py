@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # open enrollment (development only); set AGENT_API_KEY in .env to require it.
     AGENT_API_KEY: str = ""
 
+    # When true, an agent without a per-agent token is refused (older agents and the Go agent have
+    # none). Leave false while the fleet is being upgraded, then turn it on.
+    REQUIRE_AGENT_TOKEN: bool = False
+
     # Delete metrics/logs older than this many days (0 disables cleanup).
     METRIC_RETENTION_DAYS: int = 30
 

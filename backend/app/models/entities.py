@@ -41,7 +41,8 @@ DEFAULT_PERMISSIONS = {
         "dashboard.view", "telemetry.view", "processes.view", "processes.kill",
         "remote_ops.execute", "incidents.view", "incidents.resolve",
         "incidents.analyze", "incidents.export", "admin.users_manage",
-        "admin.audit_view", "ai_chat.use", "wol.view", "wol.execute", "wol.manage"
+        "admin.audit_view", "ai_chat.use", "wol.view", "wol.execute", "wol.manage",
+        "agents.manage"
     ],
     "MANAGER": [
         "dashboard.view", "telemetry.view", "processes.view", "processes.kill",
@@ -134,6 +135,8 @@ class Machine(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=True)
     drives = Column(JSON, nullable=True)  # latest partition-usage snapshot
+    # SHA-256 of the per-agent token issued at enrolment. NULL = an older agent that has none yet.
+    agent_token_hash = Column(String(64), nullable=True)
 
     metrics = relationship("MachineMetric", back_populates="machine", cascade="all, delete-orphan")
     network_metrics = relationship("NetworkMetric", back_populates="machine", cascade="all, delete-orphan")
@@ -245,6 +248,8 @@ class AgentCommand(Base):
     result_output = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utc_now)
     executed_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    requested_by = Column(String(255), nullable=True)
 
     machine = relationship("Machine", back_populates="commands")
 
