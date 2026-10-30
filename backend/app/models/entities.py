@@ -42,19 +42,22 @@ DEFAULT_PERMISSIONS = {
         "remote_ops.execute", "incidents.view", "incidents.resolve",
         "incidents.analyze", "incidents.export", "admin.users_manage",
         "admin.audit_view", "ai_chat.use", "wol.view", "wol.execute", "wol.manage",
-        "agents.manage"
+        "agents.manage", "assets.view", "assets.manage", "network.manage"
     ],
     "MANAGER": [
         "dashboard.view", "telemetry.view", "processes.view", "processes.kill",
         "incidents.view", "incidents.resolve", "incidents.analyze",
-        "incidents.export", "admin.audit_view", "ai_chat.use", "wol.view", "wol.execute"
+        "incidents.export", "admin.audit_view", "ai_chat.use", "wol.view", "wol.execute",
+        "assets.view", "assets.manage"
     ],
     "OPERATOR": [
         "dashboard.view", "telemetry.view", "processes.view", "processes.kill",
-        "incidents.view", "incidents.resolve", "ai_chat.use", "wol.view", "wol.execute"
+        "incidents.view", "incidents.resolve", "ai_chat.use", "wol.view", "wol.execute",
+        "assets.view"
     ],
     "VIEWER": [
-        "dashboard.view", "telemetry.view", "processes.view", "incidents.view", "wol.view"
+        "dashboard.view", "telemetry.view", "processes.view", "incidents.view", "wol.view",
+        "assets.view"
     ]
 }
 

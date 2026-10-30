@@ -86,6 +86,9 @@ All settings live in `backend/.env` (see `backend/.env.example`).
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM endpoint and model. |
 | `CORS_ORIGINS` | Allowed browser origins. |
 | `AGENT_API_KEY` | Shared key agents must send to enroll and report. While it is empty anyone who can reach the API can enrol an agent; required in production. |
+| `TRUSTED_PROXIES` | JSON list of proxy addresses/CIDRs (default loopback) whose `X-Forwarded-For` is believed, e.g. `["172.18.0.0/16"]` for the nginx container. Anyone else's header is ignored. Needed for the self-service page to see real client addresses behind a proxy. |
+| `SCAN_MAX_HOSTS` | Largest range one network scan may cover (default 1024). Larger ranges are refused, not truncated. |
+| `SCAN_ALLOW_PUBLIC` | `false` (default) restricts scans to private (RFC 1918) addresses; loopback, link-local and multicast are never scanned. |
 | `REQUIRE_AGENT_TOKEN` | `false` (default) still accepts older agents and the Go agent, which have no per-agent token. Set `true` once every agent is upgraded. |
 
 The file is read from `backend/.env` next to the code, wherever the server is started from, and a warning is
@@ -114,6 +117,14 @@ pytest
   server's signature (or `AGENT_ALLOWED_HOSTS=host1,host2` on the agent).
 - Downloading the agent needs a signed-in user with `agents.manage` (or the agent key, used for self-update),
   is audited, and the bundle never includes `agent_config.json`, `.env` or key files.
+- The asset register, network scans and the AI assistant have their own permissions: `assets.view`
+  (look; licence keys are masked), `assets.manage` (change, sync, export), `network.manage` (scan and
+  manage saved ranges) and `ai_chat.use`. Changes to the register, scans and exports are audited.
+- Scans only cover private address ranges up to `SCAN_MAX_HOSTS`, one at a time.
+- The no-login `/self-service` page recognises a computer by its address, so it can only be used from inside
+  the network, only changes the four owner fields of a computer the monitor already knows, is rate limited
+  and audited, and never creates records for unknown addresses.
+- CSV exports prefix cells that start with `=`, `+`, `-` or `@` so they open as text, not formulas.
 - Remote actions are limited to a fixed list (shell, kill, reboot, diagnose, service control), validated on
   the server, expire after 5 minutes if the machine does not collect them, and can be cancelled.
 - Remote actions, process kills, MAC changes, deleting machines and pushing updates are recorded in the audit

@@ -17,6 +17,7 @@ from backend.app.models.entities import (
 from backend.app.api.deps import get_current_user, require_permission, record_audit_event
 from backend.app.core.config import settings
 from backend.app.core.security import secure_equals
+from backend.app.core.netutil import client_ip
 from backend.app.services.agent_commands import (
     CommandRejected, FINAL_STATUSES, MAX_OUTPUT_LENGTH, REENROLL_AFTER, REPORTABLE_STATUSES,
     effective_expiry, expire_stale_commands, expiry_for, hash_agent_token, new_agent_token, token_matches,
@@ -46,8 +47,8 @@ def limit_body(max_bytes: int):
 
 
 def _ip(request: Request) -> Optional[str]:
-    # The socket peer, not X-Forwarded-For: a client can write whatever it likes in a header.
-    return request.client.host if request.client else None
+    # The socket peer, or the client our own trusted proxy saw - never a header from the client itself.
+    return client_ip(request) or None
 
 
 def _audit(db: Session, request: Request, actor: str, action: str, target: Optional[str] = None,

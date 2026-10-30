@@ -25,6 +25,9 @@ within a few working days.
   nothing. Agents on versions before this change keep working and do not check signatures.
 - Moving the dashboard to another host name: set the new `PUBLIC_HTTPS_BASE_URL`; the signed hint lets
   agents follow it. Without `AGENT_API_KEY` they only follow the host they already use.
+- Behind nginx or another proxy set `TRUSTED_PROXIES` to the proxy's address, otherwise every visitor looks
+  like the proxy. Do not publish the API port directly next to a trusted proxy: a client that reaches it
+  directly through the proxy's network could then claim any address in `X-Forwarded-For`.
 - Terminate TLS in front of the API and dashboard.
 - Give the database and agent accounts least privilege.
 - Do not expose the API to an untrusted network; it can run remote actions.

@@ -60,15 +60,17 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
+def has_permission(user: User, permission: str) -> bool:
+    if user.role == UserRole.ADMIN:
+        return True
+    return permission in (user.permissions or DEFAULT_PERMISSIONS.get(user.role, []))
+
+
 def require_permission(required_permission: str) -> Callable:
     def permission_checker(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
         if getattr(current_user, "must_change_password", False):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password change required before continuing")
-        if current_user.role == UserRole.ADMIN:
-            return current_user
-
-        user_perms = current_user.permissions or DEFAULT_PERMISSIONS.get(current_user.role, [])
-        if required_permission not in user_perms:
+        if not has_permission(current_user, required_permission):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access Denied: Missing required permission [{required_permission}]"

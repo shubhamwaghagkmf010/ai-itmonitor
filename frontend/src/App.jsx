@@ -431,6 +431,7 @@ export default function App() {
     try { const r = await axios.get(`${API_BASE}/assets/coverage`, authHdr()); setAssetCoverage(r.data); } catch (e) { setAssetCoverage(null); }
   };
   const syncAssets = async () => {
+    if (!hasPerm('assets.manage')) return;
     try { await axios.post(`${API_BASE}/assets/sync`, {}, authHdr()); await fetchAssets(); await fetchCoverage(); } catch (e) {}
   };
   const saveAsset = async () => {
@@ -1072,7 +1073,7 @@ export default function App() {
                 <Radio className="w-3.5 h-3.5" /> Asset Audit
               </button>
             )}
-            {hasPerm('telemetry.view') && (
+            {hasPerm('assets.view') && (
               <button
                 onClick={() => { setActiveView('INV_ASSETS'); fetchAssets(); fetchCoverage(); }}
                 className={`text-xs px-3 py-1.5 rounded transition flex items-center gap-1.5 ${
@@ -2203,10 +2204,10 @@ export default function App() {
               <p className="text-xs text-slate-400 mt-1">Scan the local network to inventory every connected device &mdash; routers, servers, PCs, VMs and mobiles.</p>
             </div>
             <div className="flex items-center gap-2">
-              <input value={scanSubnet} onChange={(e) => setScanSubnet(e.target.value)} placeholder="Auto (e.g. 192.168.1.0/24)" className="bg-[#0f172a] border border-[#334155] text-white text-xs rounded-lg px-3 py-2 w-56 focus:outline-none focus:border-teal-500" />
+              {hasPerm('network.manage') && (<><input value={scanSubnet} onChange={(e) => setScanSubnet(e.target.value)} placeholder="Auto (e.g. 192.168.1.0/24)" className="bg-[#0f172a] border border-[#334155] text-white text-xs rounded-lg px-3 py-2 w-56 focus:outline-none focus:border-teal-500" />
               <button onClick={() => runNetworkScan()} disabled={isScanning} className="bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
                 {isScanning ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Radio className="w-4 h-4" />} {isScanning ? 'Scanning...' : 'Scan Network'}
-              </button>
+              </button></>)}
               <button onClick={exportCSV} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
                 <FileDown className="w-4 h-4" /> Export CSV
               </button>
@@ -2219,8 +2220,8 @@ export default function App() {
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Saved Ranges</h3>
               <div className="flex items-center gap-2">
-                <input value={newRangeName} onChange={(e) => setNewRangeName(e.target.value)} placeholder="Name (e.g. Server LAN)" className="bg-[#0f172a] border border-[#334155] text-white text-xs rounded-lg px-3 py-1.5 w-44 focus:outline-none focus:border-teal-500" />
-                <button onClick={saveRange} className="bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1.5 rounded-lg whitespace-nowrap">Save current range</button>
+                {hasPerm('network.manage') && (<><input value={newRangeName} onChange={(e) => setNewRangeName(e.target.value)} placeholder="Name (e.g. Server LAN)" className="bg-[#0f172a] border border-[#334155] text-white text-xs rounded-lg px-3 py-1.5 w-44 focus:outline-none focus:border-teal-500" />
+                <button onClick={saveRange} className="bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1.5 rounded-lg whitespace-nowrap">Save current range</button></>)}
               </div>
             </div>
             {savedRanges.length === 0 ? (
@@ -2231,7 +2232,7 @@ export default function App() {
                   <div key={r.id} className="flex items-center gap-2 bg-[#0f172a] border border-[#1e293b] rounded-lg px-3 py-1.5 text-xs">
                     <button onClick={() => scanRange(r.target)} className="text-teal-400 hover:text-teal-300 font-medium">{r.name}</button>
                     <span className="text-slate-500 font-mono">{r.target}</span>
-                    <button onClick={() => deleteRange(r.id)} className="text-rose-400 hover:text-rose-300 font-bold">&times;</button>
+                    {hasPerm('network.manage') && <button onClick={() => deleteRange(r.id)} className="text-rose-400 hover:text-rose-300 font-bold">&times;</button>}
                   </div>
                 ))}
               </div>
@@ -2412,13 +2413,13 @@ export default function App() {
               <p className="text-xs text-slate-400 mt-1">Full asset inventory. Technical columns auto-fill from agents; fill the rest and export to Excel/CSV.</p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <button onClick={syncAssets} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Sync from Agents</button>
+              {hasPerm('assets.manage') && (<><button onClick={syncAssets} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><RefreshCw className="w-4 h-4" /> Sync from Agents</button>
               <button onClick={() => { const v = !assetAutoSync; setAssetAutoSync(v); try { localStorage.setItem('assetAutoSync', v ? '1' : '0'); } catch (e) {} if (v) syncAssets(); }}
                 className={`text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 border ${assetAutoSync ? 'bg-emerald-700 border-emerald-500 text-white' : 'bg-[#0f172a] border-[#1e293b] text-slate-400 hover:text-white'}`}>
                 <span className={`w-2 h-2 rounded-full ${assetAutoSync ? 'bg-emerald-300 animate-pulse' : 'bg-slate-500'}`}></span> Auto-Sync {assetAutoSync ? 'On' : 'Off'}
               </button>
               <button onClick={() => setAssetModal({})} className="bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><UserPlus className="w-4 h-4" /> Add Asset</button>
-              <button onClick={exportAssets} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><FileDown className="w-4 h-4" /> Export CSV</button>
+              <button onClick={exportAssets} className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2"><FileDown className="w-4 h-4" /> Export CSV</button></>)}
             </div>
           </div>
 
@@ -2453,7 +2454,7 @@ export default function App() {
                     <tr key={a.id} className="hover:bg-[#0f172a]/40">
                       <td className="px-3 py-2 text-slate-500 sticky left-0 bg-[#131d31]">{idx + 1}</td>
                       {ASSET_COLS.map(([k]) => (<td key={k} className="px-3 py-2 text-slate-300">{a[k] || '\u2014'}</td>))}
-                      <td className="px-3 py-2"><div className="flex items-center gap-3"><button onClick={() => setAssetModal({ ...a })} title="Edit" className="text-teal-400 hover:text-teal-300"><Sliders className="w-3.5 h-3.5" /></button><button onClick={() => { if (window.confirm(`Remove asset ${a.asset_no || a.host_name || a.id} from the register?`)) deleteAsset(a.id); }} title="Remove" className="text-rose-400 hover:text-rose-300"><Trash2 className="w-3.5 h-3.5" /></button></div></td>
+                      <td className="px-3 py-2">{hasPerm('assets.manage') && <div className="flex items-center gap-3"><button onClick={() => setAssetModal({ ...a })} title="Edit" className="text-teal-400 hover:text-teal-300"><Sliders className="w-3.5 h-3.5" /></button><button onClick={() => { if (window.confirm(`Remove asset ${a.asset_no || a.host_name || a.id} from the register?`)) deleteAsset(a.id); }} title="Remove" className="text-rose-400 hover:text-rose-300"><Trash2 className="w-3.5 h-3.5" /></button></div>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2493,7 +2494,7 @@ export default function App() {
                             <td className="py-1 pr-2 text-slate-300">{d.hostname || '\u2014'}</td>
                             <td className="py-1 pr-2 font-mono text-slate-500">{d.mac || '\u2014'}</td>
                             <td className="py-1 pr-2 text-slate-400">{d.device_type}</td>
-                            <td className="py-1"><button onClick={() => setAssetModal({ host_name: d.hostname || d.ip })} className="text-teal-400 hover:text-teal-300 font-semibold">+ Add</button></td>
+                            <td className="py-1">{hasPerm('assets.manage') && <button onClick={() => setAssetModal({ host_name: d.hostname || d.ip })} className="text-teal-400 hover:text-teal-300 font-semibold">+ Add</button>}</td>
                           </tr>
                         );
                       })}

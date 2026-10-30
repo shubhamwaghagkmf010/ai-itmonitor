@@ -18,6 +18,9 @@ import pathlib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+from backend.app.core.config import settings
+from backend.app.core.netutil import parse_scan_target
+
 # Small curated fallback (used before/if the full DB is unavailable).
 OUI = {
     "001B21": "Intel", "BC2411": "Proxmox Server Solutions", "000C29": "VMware", "005056": "VMware",
@@ -179,21 +182,6 @@ def _neighbours():
     return res
 
 
-def _expand(spec):
-    spec = spec.strip()
-    if "-" in spec:
-        a, b = spec.split("-", 1)
-        a, b = a.strip(), b.strip()
-        if "." not in b:
-            b = a.rsplit(".", 1)[0] + "." + b
-        start, end = int(ipaddress.ip_address(a)), int(ipaddress.ip_address(b))
-        if end < start:
-            start, end = end, start
-        return [str(ipaddress.ip_address(i)) for i in range(start, end + 1)], f"{a} - {b}"
-    net = ipaddress.ip_network(spec, strict=False)
-    return [str(h) for h in net.hosts()], str(net)
-
-
 def _enrich(ip, mac):
     try:
         hostname = socket.gethostbyaddr(ip)[0]
@@ -212,15 +200,14 @@ def _enrich(ip, mac):
     }
 
 
-def scan_subnet(cidr=None, max_hosts=1024):
+def scan_subnet(cidr=None, max_hosts=None):
     cidr = cidr or get_local_subnet()
     if not cidr:
         return {"error": "Could not determine the local subnet."}
     try:
-        hosts, label = _expand(cidr)
+        hosts, label = parse_scan_target(cidr, max_hosts or settings.SCAN_MAX_HOSTS, settings.SCAN_ALLOW_PUBLIC)
     except ValueError as e:
         return {"error": f"Invalid range/subnet: {e}"}
-    hosts = hosts[:max_hosts]
 
     _load_oui()  # warm the vendor DB (downloads once, then cached)
 

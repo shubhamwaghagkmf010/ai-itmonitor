@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     # none). Leave false while the fleet is being upgraded, then turn it on.
     REQUIRE_AGENT_TOKEN: bool = False
 
+    # Reverse proxies (addresses or CIDRs) whose X-Forwarded-For header is believed. Anyone else's
+    # header is ignored, because a client can write whatever it likes in it. Put the address of your
+    # nginx/ingress here when the API sits behind one; loopback is trusted by default.
+    TRUSTED_PROXIES: List[str] = ["127.0.0.1/32", "::1/128"]
+
+    # Network scans: the largest range one scan may cover, and whether addresses outside the private
+    # ranges (RFC 1918) may be scanned at all. Scanning other people's networks is off by default.
+    SCAN_MAX_HOSTS: int = 1024
+    SCAN_ALLOW_PUBLIC: bool = False
+
     # Delete metrics/logs older than this many days (0 disables cleanup).
     METRIC_RETENTION_DAYS: int = 30
 
