@@ -29,6 +29,23 @@ class SlidingWindowLimiter:
             q.append(now)
             return True
 
+    def is_limited(self, key: str, now: float = None) -> bool:
+        """Whether the key has used up its quota, without counting this look as a use."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            q = self._hits.get(key)
+            if not q:
+                return False
+            while q and now - q[0] > self.per_seconds:
+                q.popleft()
+            return len(q) >= self.max_calls
+
+    def record(self, key: str, now: float = None) -> None:
+        """Counts a use (for limits that apply to failures only)."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            self._hits[key].append(now)
+
     def reset(self) -> None:
         with self._lock:
             self._hits.clear()

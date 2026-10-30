@@ -95,6 +95,8 @@ class User(Base):
     role = Column(String(50), default="OPERATOR", nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
     must_change_password = Column(Boolean, default=False, nullable=False)
+    # Raised to cancel every token issued before (password change/reset, account disabled, log out everywhere).
+    token_version = Column(Integer, default=0, nullable=False)
     
     permissions = Column(JSON, default=list, nullable=True)
     widget_permissions = Column(JSON, default=dict, nullable=True)

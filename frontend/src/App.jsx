@@ -250,7 +250,9 @@ export default function App() {
     }
   };
 
-  const handlePasswordChanged = () => {
+  const handlePasswordChanged = (newToken) => {
+    // Changing the password ends the other sessions; this one continues on the token the server just issued.
+    if (newToken) { try { localStorage.setItem('token', newToken); } catch (e) {} setToken(newToken); }
     const u = { ...(currentUser || {}), must_change_password: false };
     setCurrentUser(u);
     try { localStorage.setItem('user_profile', JSON.stringify(u)); } catch (e) {}
@@ -2879,12 +2881,12 @@ function ForcedPasswordChange({ token, onDone }) {
   const [busy, setBusy] = useState(false);
   const submit = async (e) => {
     e.preventDefault(); setErr('');
-    if (next.length < 6) { setErr('New password must be at least 6 characters.'); return; }
+    if (next.length < 10) { setErr('New password must be at least 10 characters.'); return; }
     if (next !== confirm) { setErr('Passwords do not match.'); return; }
     setBusy(true);
     try {
-      await axios.post(`${API_BASE}/auth/change-password`, { current_password: current, new_password: next }, { headers: { Authorization: `Bearer ${token}` } });
-      onDone();
+      const res = await axios.post(`${API_BASE}/auth/change-password`, { current_password: current, new_password: next }, { headers: { Authorization: `Bearer ${token}` } });
+      onDone(res.data.access_token);
     } catch (e2) { setErr(e2.response?.data?.detail || 'Could not change password.'); }
     finally { setBusy(false); }
   };

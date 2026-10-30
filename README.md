@@ -103,7 +103,18 @@ pytest
 
 ## Security
 
-- Passwords are bcrypt-hashed; sessions are JWT.
+- Passwords are bcrypt-hashed; sessions are JWT. Passwords must be at least 10 characters (at most 72 bytes),
+  not an obvious one (`password123`, `ChangeMe#Admin1`, ...) and must not contain the user name.
+- Logging in is rate limited per address and per account, an unknown user costs the same time as a wrong
+  password, five wrong passwords lock the account for 15 minutes (a lock stops logins, it does not end a
+  session that is already open), and a lock that has expired starts counting again from zero.
+- Sessions can be ended: changing or resetting a password, disabling an account and `POST /auth/logout-all`
+  all revoke every token issued before. Changing your own password keeps the current session.
+- Users created or reset by an administrator must choose their own password at first login.
+- Administering users: only an administrator can create or change administrators; anyone else with
+  `admin.users_manage` can only give permissions they hold themselves; nobody can change their own role,
+  permissions or status; the last active administrator cannot be demoted or disabled. Roles and permission
+  names are validated, and role/permission changes are audited with what was added and removed.
 - Agent enrollment and metric ingestion can require a shared key (`AGENT_API_KEY`).
 - Each enrolled agent also gets its own token (stored hashed). With it, knowing a machine's `agent_id`
   (derived from its hostname and MAC) is not enough to report as it, collect its commands or answer for

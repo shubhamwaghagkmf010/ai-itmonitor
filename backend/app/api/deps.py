@@ -42,20 +42,24 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM],
+                             options={"require_exp": True, "require_sub": True})
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
-    except JWTError:
+        token_version = int(payload.get("tv", 0))  # tokens issued before versions existed count as 0
+    except (JWTError, ValueError, TypeError):
         raise credentials_exception
 
     user = db.query(User).filter(User.email == email).first()
     if user is None:
         raise credentials_exception
+    if token_version != (user.token_version or 0):
+        raise credentials_exception  # revoked: the password changed, the account was disabled, or logged out everywhere
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user account")
-    if user.locked_until and user.locked_until > datetime.now(timezone.utc):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is temporarily locked due to security policy")
+    # Not checked here: locked_until throttles *logging in*. Enforcing it on live sessions would let anyone
+    # who types five wrong passwords for an administrator throw that administrator out.
 
     return user
 
