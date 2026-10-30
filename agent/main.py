@@ -330,41 +330,46 @@ def register_agent(client: httpx.Client) -> str:
 def _start_wol_relay():
     """Listen on UDP 9999 for a MAC address; broadcast the Wake-on-LAN magic packet on THIS
     machine's local subnet. Lets the server wake a PC on a subnet it cannot broadcast to,
-    by relaying through an always-on agent that shares the PC's subnet."""
-    def _magic(mac):
-        clean = mac.replace(":", "").replace("-", "").strip()
-        return b"\xff" * 6 + bytes.fromhex(clean) * 16
+    by relaying through an always-on agent that shares the PC's subnet.
+
+    The datagram is unauthenticated, so it is only acted on when it comes from the server this agent reports
+    to (or an address in RELAY_ALLOWED_SOURCES), the MAC is strictly validated, and the rate is limited.
+    RELAY_ALLOW_ANY=1 restores the old accept-from-anyone behaviour."""
+    from agent.wol import RELAY_PORT, RelayPolicy, broadcast_magic_packet, resolve_sources
+
+    allow_any = os.getenv("RELAY_ALLOW_ANY") == "1"
+    extra = os.getenv("RELAY_ALLOWED_SOURCES", "")
+    policy = RelayPolicy(None if allow_any else resolve_sources(SERVER_URL, extra))
+
+    def _refresh_sources():
+        while True:  # the server's address can change (DHCP, a move to HTTPS on another name)
+            time.sleep(300)
+            policy.update_sources(resolve_sources(SERVER_URL, extra))
 
     def _listen():
         try:
             srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind(("0.0.0.0", 9999))
+            srv.bind(("0.0.0.0", RELAY_PORT))
         except Exception as e:
-            print(f"[relay] could not bind udp/9999: {e}")
+            print(f"[relay] could not bind udp/{RELAY_PORT}: {e}")
             return
-        caster = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        caster.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        print("[relay] Wake-on-LAN relay listening on udp/9999")
+        print(f"[relay] Wake-on-LAN relay listening on udp/{RELAY_PORT}"
+              + (" (accepting anyone)" if allow_any else f" (accepting {sorted(policy.allowed_sources) or 'nobody yet'})"))
         while True:
             try:
-                data, _addr = srv.recvfrom(1024)
-                mac = data.decode("utf-8", "ignore").strip()
-                if len(mac.replace(":", "").replace("-", "")) == 12:
-                    pkt = _magic(mac)
-                    for _ in range(3):
-                        for port in (7, 9):
-                            try:
-                                caster.sendto(pkt, ("255.255.255.255", port))
-                            except Exception:
-                                pass
-                        time.sleep(0.04)
+                data, (source, _port) = srv.recvfrom(64)
+                mac = policy.check(source, data)
+                if mac:
+                    broadcast_magic_packet(mac)
                     print(f"[relay] broadcast magic packet locally for {mac}")
             except Exception as e:
                 print(f"[relay] error: {e}")
                 time.sleep(1)
 
     threading.Thread(target=_listen, daemon=True).start()
+    if not allow_any:
+        threading.Thread(target=_refresh_sources, daemon=True).start()
 
 EXEC_TIMEOUT = int(os.getenv("CMD_TIMEOUT", "45"))
 

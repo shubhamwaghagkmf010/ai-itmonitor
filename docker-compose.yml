@@ -5,10 +5,17 @@
 # backend/.env supplies SECRET_KEY, AGENT_API_KEY, POSTGRES_PASSWORD and the rest. The database password is
 # no longer written in this file; compose refuses to start without one.
 
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:15-alpine
     container_name: ai_itmonitor_db
+    logging: *logging
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ai_itmonitor_user}
@@ -31,6 +38,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
     container_name: ai_itmonitor_backend
+    logging: *logging
     restart: unless-stopped
     env_file:
       - backend/.env
@@ -71,6 +79,7 @@ services:
     # Not pinned to a version here: pin the tag you have tested before relying on this in production.
     image: ollama/ollama:latest
     container_name: ai_itmonitor_ollama
+    logging: *logging
     restart: unless-stopped
     environment:
       OLLAMA_MODEL: "qwen2.5:0.5b"
@@ -95,6 +104,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.frontend
     container_name: ai_itmonitor_frontend
+    logging: *logging
     restart: unless-stopped
     ports:
       - "5173:80"

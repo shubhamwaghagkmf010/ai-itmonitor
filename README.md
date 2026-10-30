@@ -84,6 +84,24 @@ cd frontend && npm install && npm run dev -- --host 0.0.0.0
 PYTHONPATH=. python3 agent/main.py
 ```
 
+### Day-to-day development
+
+`./start_all.sh` starts the API, a local agent and the Vite dev server; `./stop_all.sh` stops them and `scripts/dev_services.sh status` shows
+what is running. They listen on 127.0.0.1 unless you set `HOST=0.0.0.0`, keep a pid file per service in `run/` and logs in `logs/`, and
+stop only the processes they started (never anything else that happens to be called uvicorn). `deploy/logrotate/ai-itmonitor` rotates those logs.
+
+### Running as a service without Docker
+
+`deploy/systemd/ai-itmonitor-backend.service` is a sandboxed unit (unprivileged user, read-only home, only the capability ping needs, schema
+migration before each start, logs in the journal). The comments at its top show the install commands. Put nginx in front of it (see
+`docker/nginx.conf`).
+
+### Wake-on-LAN by hand
+
+`python scripts/wol_tool.py send AA:BB:CC:DD:EE:FF --to 192.168.1.255` broadcasts a magic packet; `... relay AA:BB:... --via <agent>` asks a relay
+agent to do it. An agent's relay (UDP 9999) only obeys the server it reports to (plus `RELAY_ALLOWED_SOURCES`), validates the MAC strictly and
+is rate limited; `RELAY_ALLOW_ANY=1` restores accept-from-anyone.
+
 ## Configuration
 
 All settings live in `backend/.env` (see `backend/.env.example`).
@@ -113,6 +131,12 @@ ADMIN_PASSWORD='a long passphrase' python scripts/seed_users.py
 Creates the administrator (and an operator; `SEED_OPERATOR=0` skips it). Without `ADMIN_PASSWORD` /
 `OPERATOR_PASSWORD` a random one is generated and printed once. There is no built-in default password,
 and each account must choose its own at first login. Existing accounts are never touched.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request: the test-suite (including the migrations against a real PostgreSQL),
+`pip-audit`, the frontend lint/build/`npm audit`, and a build of both container images with checks that the backend runs as an unprivileged
+user and holds no settings file. Dependabot proposes dependency updates weekly.
 
 ## Tests
 

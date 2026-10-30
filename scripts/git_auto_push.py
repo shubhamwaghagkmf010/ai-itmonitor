@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -50,6 +51,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 ALLOWLIST = {
     "YOUR_SECRET_KEY", "YOUR_DB_PASSWORD", "YOUR_API_KEY", "change_me",
     "ChangeMe123!", "replace_this", "example", "localhost", "192.168.1.0",
+    "172.29.77.",  # the private network docker-compose.yml creates for its own containers
     # Documentation examples of private ranges are allowed in markdown only (handled below).
 }
 
@@ -122,7 +124,8 @@ def scan_for_secrets(root: Path, files: list[tuple[str, str]]) -> list[str]:
             text = p.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        is_doc = p.suffix.lower() in DOC_SUFFIXES
+        # Sample addresses in docs, examples and test fixtures are fine; real configuration is not.
+        is_doc = p.suffix.lower() in DOC_SUFFIXES or rel.replace(os.sep, "/").startswith("tests/")
         for lineno, line in enumerate(text.splitlines(), 1):
             for label, pat in SECRET_PATTERNS:
                 m = pat.search(line)

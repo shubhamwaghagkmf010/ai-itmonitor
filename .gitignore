@@ -36,3 +36,7 @@ backend/app/services/oui_cache.csv
 backend/agent_dist/
 node_modules/
 certs/
+
+# Dev launcher (scripts/dev_services.sh)
+run/
+logs/

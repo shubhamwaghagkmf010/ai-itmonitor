@@ -1,0 +1,65 @@
+# AI-ITMonitor API as a systemd service (the alternative to docker compose).
+#
+# Install (as root), replacing the two placeholders:
+#   useradd --system --home-dir __APP_DIR__ --shell /usr/sbin/nologin aimonitor      # once
+#   sed -e 's|__APP_DIR__|/opt/ai-itmonitor|g' -e 's|__SERVICE_USER__|aimonitor|g' \
+#       deploy/systemd/ai-itmonitor-backend.service > /etc/systemd/system/ai-itmonitor-backend.service
+#   systemctl daemon-reload && systemctl enable --now ai-itmonitor-backend
+#
+# The service reads its settings from __APP_DIR__/backend/.env (readable by the service user only, mode 600),
+# needs a virtual environment in __APP_DIR__/venv, and listens on 127.0.0.1:8000 - put nginx in front of it
+# (docker/nginx.conf shows the proxy settings) and add its address to TRUSTED_PROXIES.
+
+[Unit]
+Description=AI-ITMonitor API
+Documentation=file://__APP_DIR__/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__APP_DIR__
+Environment=PYTHONPATH=__APP_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=OUI_CACHE_DIR=/var/lib/ai-itmonitor
+# Brings the database schema up to date (waits for the database; safe to repeat).
+ExecStartPre=__APP_DIR__/venv/bin/python scripts/migrate.py
+ExecStart=__APP_DIR__/venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Logs go to the journal (journalctl -u ai-itmonitor-backend), which rotates them itself.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ai-itmonitor-backend
+
+# Writable state: just the network-vendor cache, in /var/lib/ai-itmonitor.
+StateDirectory=ai-itmonitor
+StateDirectoryMode=0750
+
+# Sandbox. The API needs the network, the database, ping (raw ICMP) and the neighbour table, nothing else.
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

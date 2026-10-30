@@ -31,6 +31,8 @@ within a few working days.
   is not believed when it claims an address in `X-Forwarded-For`.
 - Keep dependencies current: `pip-audit -r backend/requirements.txt` and `npm audit` in `frontend/` should report
   nothing. Run the test-suite after any upgrade; the Python libraries are pinned to exact versions.
+- Wake-on-LAN relaying (UDP 9999 on agents) is unauthenticated by nature, so it only acts on datagrams from the server and is rate limited. If your
+  server reaches agents from a different address than it reports to (NAT, a second interface), list it in the agent's `RELAY_ALLOWED_SOURCES`.
 - Terminate TLS in front of the API and dashboard.
 - Give the database and agent accounts least privilege.
 - Do not expose the API to an untrusted network; it can run remote actions.

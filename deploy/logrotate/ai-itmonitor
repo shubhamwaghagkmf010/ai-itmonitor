@@ -1,0 +1,14 @@
+# Rotation for the logs written by scripts/dev_services.sh (start_all.sh). Install as root:
+#   sed 's|__APP_DIR__|/opt/ai-itmonitor|g' deploy/logrotate/ai-itmonitor > /etc/logrotate.d/ai-itmonitor
+# The services keep their log file open, so it is copied and truncated rather than moved.
+# (The systemd service logs to the journal and docker compose caps its own logs; neither needs this.)
+__APP_DIR__/logs/*.log {
+    weekly
+    rotate 8
+    maxsize 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

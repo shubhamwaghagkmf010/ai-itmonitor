@@ -1011,7 +1011,6 @@ def software_search(q: str, db: Session = Depends(get_db),
 
 # The packaged Windows/cross-platform agent, downloadable without auth so it is easy to
 # roll out to endpoints (it contains no secrets — only the server URL, set at run time).
-_AGENT_BUNDLE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "agent_dist", "ai-itmonitor-agent.zip"))
 
 
 _AGENT_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "agent"))
