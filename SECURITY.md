@@ -26,8 +26,11 @@ within a few working days.
 - Moving the dashboard to another host name: set the new `PUBLIC_HTTPS_BASE_URL`; the signed hint lets
   agents follow it. Without `AGENT_API_KEY` they only follow the host they already use.
 - Behind nginx or another proxy set `TRUSTED_PROXIES` to the proxy's address, otherwise every visitor looks
-  like the proxy. Do not publish the API port directly next to a trusted proxy: a client that reaches it
-  directly through the proxy's network could then claim any address in `X-Forwarded-For`.
+  like the proxy. The compose file already does this for its own web-server container (a fixed address on a
+  private network), and publishes the API port on this machine only, so a request that reaches the API directly
+  is not believed when it claims an address in `X-Forwarded-For`.
+- Keep dependencies current: `pip-audit -r backend/requirements.txt` and `npm audit` in `frontend/` should report
+  nothing. Run the test-suite after any upgrade; the Python libraries are pinned to exact versions.
 - Terminate TLS in front of the API and dashboard.
 - Give the database and agent accounts least privilege.
 - Do not expose the API to an untrusted network; it can run remote actions.

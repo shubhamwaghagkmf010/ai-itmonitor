@@ -28,7 +28,9 @@ OUI = {
     "309C23": "Micro-Star (MSI)",
 }
 
-OUI_CACHE = pathlib.Path(__file__).parent / "oui_cache.csv"
+# Downloaded once and kept. In the container the code directory is not writable by the application, so
+# OUI_CACHE_DIR points at the data volume there.
+OUI_CACHE = pathlib.Path(os.environ.get("OUI_CACHE_DIR") or pathlib.Path(__file__).parent) / "oui_cache.csv"
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
 _oui_map = None
 

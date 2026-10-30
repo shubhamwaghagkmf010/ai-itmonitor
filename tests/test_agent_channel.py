@@ -487,4 +487,4 @@ def test_the_migration_gives_agents_manage_to_users_who_could_manage_wol():
     spec = importlib.util.spec_from_file_location("migration", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert module.down_revision == "a7b8c9d0e1f2"
+    assert module.down_revision == "a8b9c0d1e2f3"

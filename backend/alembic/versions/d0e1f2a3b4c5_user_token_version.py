@@ -17,10 +17,17 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_column(table: str, column: str) -> bool:
+    # A database built by create_all() from the current models already has these columns; adding them
+    # again would fail the whole upgrade.
+    return column in {c["name"] for c in sa.inspect(op.get_bind()).get_columns(table)}
+
+
 def upgrade() -> None:
     # Existing users start at 0, which is also what tokens issued before this change count as,
     # so nobody is signed out by the upgrade.
-    op.add_column("users", sa.Column("token_version", sa.Integer(), nullable=False, server_default="0"))
+    if not _has_column("users", "token_version"):
+        op.add_column("users", sa.Column("token_version", sa.Integer(), nullable=False, server_default="0"))
 
 
 def downgrade() -> None:

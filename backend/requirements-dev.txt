@@ -1,2 +1,4 @@
 -r requirements.txt
-pytest==8.3.4
+pytest==9.2.0
+# Imported by the agent code that tests/test_update_security.py exercises (the server itself does not use it).
+psutil==7.2.2

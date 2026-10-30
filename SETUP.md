@@ -13,34 +13,38 @@ repository — you supply your own below.
    git clone https://github.com/shubhamwaghagkmf010/ai-itmonitor.git && cd ai-itmonitor
    ```
 
-2. Create your own environment file (never commit it) and set your secrets:
+2. Create your settings file (never commit it). This generates a real `SECRET_KEY`, mode 600:
    ```
-   cp backend/.env.example backend/.env
+   python3 scripts/init_env.py --with-agent-key
    ```
-   Edit `backend/.env` and set at least `SECRET_KEY` and `POSTGRES_PASSWORD`.
+   Then edit `backend/.env` and set `POSTGRES_PASSWORD` to a strong password. Every agent will need the
+   same `AGENT_API_KEY`.
 
-3. Build and start the stack:
+3. Put your TLS certificate files in `./certs` (see `scripts/setup_tls.sh`), then build and start the stack.
+   Compose reads the passwords from the settings file, so name it:
    ```
-   docker compose up --build -d
+   docker compose --env-file backend/.env up -d --build
+   ```
+   The database schema is created (or brought up to date) automatically when the backend starts, and the
+   backend runs as an unprivileged user. Compose refuses to start if `POSTGRES_PASSWORD` is not set.
+
+4. Create the first administrator. Set your own password, or leave `ADMIN_PASSWORD` out and a random one is
+   printed once. Either way the account must choose a new password at first login:
+   ```
+   docker compose --env-file backend/.env exec -e ADMIN_PASSWORD='a long passphrase' backend python scripts/seed_users.py
    ```
 
-4. Create the database tables:
+5. Check that everything is healthy:
    ```
-   docker exec -e PYTHONPATH=/app ai_itmonitor_backend python -c "from backend.app.core.database import Base, engine; import backend.app.models.entities; Base.metadata.create_all(bind=engine); print('schema ready')"
+   docker compose --env-file backend/.env ps
    ```
-
-5. Create the admin user (choose YOUR own password in place of Admin@12345). The
-   user is flagged to change the password on first login:
-   ```
-   docker exec -e PYTHONPATH=/app ai_itmonitor_backend python -c "from sqlalchemy.orm import Session; from backend.app.core.database import engine; from backend.app.models.entities import User, DEFAULT_PERMISSIONS, DEFAULT_WIDGETS; from backend.app.core.security import get_password_hash; db=Session(engine); e='admin@ai-itmonitor.local'; u=db.query(User).filter(User.email==e).first() or User(email=e); u.full_name='Administrator'; u.role='ADMIN'; u.is_active=True; u.permissions=DEFAULT_PERMISSIONS['ADMIN']; u.widget_permissions=DEFAULT_WIDGETS['ADMIN']; u.must_change_password=True; u.hashed_password=get_password_hash('Admin@12345'); db.add(u); db.commit(); print('admin ready', e)"
-   ```
-   On first login the app forces this user to set a new password before anything else.
+   `backend` and `postgres` should say `healthy`.
 
 6. Open the dashboard:
    ```
    docker compose port frontend 80
    ```
-   Browse to `http://YOUR_SERVER_IP:<port>` and log in with `admin@ai-itmonitor.local` / `Admin@12345` (you will be required to set a new password on first login).
+   Browse to `http://YOUR_SERVER_IP:<port>` and log in with `admin@ai-itmonitor.local` and the password from step 4 (you will be required to set a new password on first login).
 
 ## Pushing changes safely
 Use the bundled helper, which scans for secrets before committing and never force-pushes:

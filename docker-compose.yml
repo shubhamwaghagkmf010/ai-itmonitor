@@ -1,46 +1,77 @@
-version: '3.8'
+# Start with the settings file that scripts/init_env.py created:
+#
+#     docker compose --env-file backend/.env up -d --build
+#
+# backend/.env supplies SECRET_KEY, AGENT_API_KEY, POSTGRES_PASSWORD and the rest. The database password is
+# no longer written in this file; compose refuses to start without one.
 
 services:
   postgres:
     image: postgres:15-alpine
     container_name: ai_itmonitor_db
-    restart: always
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: ai_itmonitor_user
-      POSTGRES_PASSWORD: ai_itmonitor_password
-      POSTGRES_DB: ai_itmonitor_db
+      POSTGRES_USER: ${POSTGRES_USER:-ai_itmonitor_user}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in backend/.env and start with: docker compose --env-file backend/.env up -d --build}"
+      POSTGRES_DB: ${POSTGRES_DB:-ai_itmonitor_db}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - monitor
 
   backend:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
     container_name: ai_itmonitor_backend
-    restart: always
+    restart: unless-stopped
+    env_file:
+      - backend/.env
     environment:
+      # These win over backend/.env: inside the compose network the database and the model have fixed names.
       POSTGRES_SERVER: postgres
-      POSTGRES_USER: ai_itmonitor_user
-      POSTGRES_PASSWORD: ai_itmonitor_password
-      POSTGRES_DB: ai_itmonitor_db
-      POSTGRES_PORT: 5432
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-ai_itmonitor_user}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in backend/.env and start with: docker compose --env-file backend/.env up -d --build}"
+      POSTGRES_DB: ${POSTGRES_DB:-ai_itmonitor_db}
       SCAN_SUBNET: "${SCAN_SUBNET:-}"
       OLLAMA_BASE_URL: "http://ollama:11434"
       OLLAMA_MODEL: "qwen2.5:0.5b"
-    env_file:
-      - .env
+      # Only the web server container below may tell the API a visitor's address (X-Forwarded-For).
+      # A request that reaches the published API port directly comes from the host, so it is not believed.
+      TRUSTED_PROXIES: '["172.29.77.10/32"]'
     ports:
-      - "8000:8000"
+      # Bound to this machine only. Agents and browsers use https://<server>/ through the web server. Agents
+      # still configured with http://<server>:8000 need BACKEND_PUBLISH=0.0.0.0:8000 until they have moved.
+      - "${BACKEND_PUBLISH:-127.0.0.1:8000}:8000"
+    volumes:
+      - appdata:/data
     depends_on:
-      - postgres
-      - ollama
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW   # ping, for network discovery
+    networks:
+      - monitor
 
   ollama:
+    # Not pinned to a version here: pin the tag you have tested before relying on this in production.
     image: ollama/ollama:latest
     container_name: ai_itmonitor_ollama
-    restart: always
+    restart: unless-stopped
     environment:
       OLLAMA_MODEL: "qwen2.5:0.5b"
     volumes:
@@ -56,13 +87,15 @@ services:
         ollama pull "$${OLLAMA_MODEL}" || echo "[ollama] pull failed; app will keep retrying"
         echo "[ollama] ready"
         wait $$pid
+    networks:
+      - monitor
 
   frontend:
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
     container_name: ai_itmonitor_frontend
-    restart: always
+    restart: unless-stopped
     ports:
       - "5173:80"
       - "80:80"
@@ -71,7 +104,19 @@ services:
       - ./certs:/etc/nginx/certs:ro
     depends_on:
       - backend
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      monitor:
+        ipv4_address: 172.29.77.10   # the one address the backend trusts to forward visitors' addresses
+
+networks:
+  monitor:
+    ipam:
+      config:
+        - subnet: 172.29.77.0/24
 
 volumes:
   pgdata:
   ollama_data:
+  appdata:

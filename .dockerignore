@@ -1,0 +1,46 @@
+# What must never be copied into an image. The build context is the whole repository, so anything not
+# listed here can end up in a layer that is pushed, shared or inspected later.
+
+# Secrets and settings (compose passes these in at run time instead)
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+certs/
+
+# State that belongs to a running agent on this machine, not to the code
+agent/agent_config.json
+**/agent_config.json
+
+# Version control and editor files
+.git
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# Build output and caches
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+venv/
+.venv/
+**/node_modules/
+frontend/dist/
+*.log
+*.zip
+*.exe
+backend/agent_dist/
+backend/app/services/oui_cache.csv
+
+# Not needed in any image
+tests/
+go_agent/
+docs/
+*.md
+!README.md

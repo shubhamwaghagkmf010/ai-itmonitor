@@ -55,10 +55,17 @@ git clone <your-repo-url> ai-itmonitor
 cd ai-itmonitor
 python3 scripts/init_env.py --with-agent-key   # creates backend/.env (mode 600) with a real SECRET_KEY and AGENT_API_KEY
 # then set POSTGRES_PASSWORD in backend/.env, and give every agent the same AGENT_API_KEY
-docker compose up --build
+docker compose --env-file backend/.env up -d --build
+docker compose --env-file backend/.env exec backend python scripts/seed_users.py   # first administrator
 ```
 
 Dashboard: <http://localhost:5173> · API docs: <http://localhost:8000/docs>
+
+The database schema is created or brought up to date automatically each time the backend container starts
+(`scripts/migrate.py`; set `RUN_MIGRATIONS=0` to run it yourself). The API container runs as an unprivileged user
+with only the capability it needs (ping), its published port is bound to this machine
+(`BACKEND_PUBLISH=0.0.0.0:8000` re-opens it for agents still using `http://server:8000`), and only the web-server
+container is trusted to say which address a visitor has (`TRUSTED_PROXIES` is preset for it).
 
 ## Running from source
 

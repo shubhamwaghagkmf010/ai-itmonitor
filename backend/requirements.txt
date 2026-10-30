@@ -1,29 +1,25 @@
 # Core Framework
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
-pydantic-settings==2.7.0
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.2
+pydantic-settings==2.16.2
 
 # Database & ORM
-sqlalchemy==2.0.36
-psycopg2-binary==2.9.10
-alembic==1.14.0
+# Kept on 2.0.x: 2.1 switches the default PostgreSQL driver to psycopg 3.
+sqlalchemy==2.0.55
+psycopg2-binary==2.9.13
+alembic==1.20.1
 
 # Authentication & Security
-PyJWT==2.10.1
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==4.2.1
-python-multipart==0.0.20
+PyJWT==2.15.1
+bcrypt==5.0.0
+python-multipart==0.0.32
 
 # Utilities
 httpx==0.28.1
-python-dotenv==1.0.1
+python-dotenv==1.2.4
 
-# Anomaly Detection & Data Handling
-numpy==2.2.1
-pandas==2.2.3
-scikit-learn==1.6.0
-email-validator==2.2.0
-psutil==6.1.1
-reportlab==4.2.5
+# Anomaly Detection & Reports
+numpy==2.5.4
+email-validator==2.3.0
+reportlab==5.1.0

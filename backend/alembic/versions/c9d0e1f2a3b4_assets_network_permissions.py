@@ -22,8 +22,10 @@ def upgrade() -> None:
     # The asset register and network scans used to need only telemetry.view. Users with an explicit
     # permission list keep access: everyone who could view telemetry may view the register, and those
     # who administered agents may also manage it and run scans.
-    users = sa.table("users", sa.column("id", sa.Integer), sa.column("permissions", sa.JSON))
     conn = op.get_bind()
+    if "permissions" not in {c["name"] for c in sa.inspect(conn).get_columns("users")}:
+        return  # nothing to carry over on a database without the column
+    users = sa.table("users", sa.column("id", sa.Integer), sa.column("permissions", sa.JSON))
     for row in conn.execute(sa.select(users.c.id, users.c.permissions)).fetchall():
         perms = row.permissions
         if isinstance(perms, str):

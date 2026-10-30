@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt as jose_jwt
+import jwt as pyjwt
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -66,7 +66,7 @@ def test_unusable_passwords_fail_verification_instead_of_crashing():
 
 
 def test_tokens_carry_expiry_issue_time_and_version():
-    claims = jose_jwt.decode(create_access_token("a@b.c", token_version=3), settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    claims = pyjwt.decode(create_access_token("a@b.c", token_version=3), settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     assert claims["sub"] == "a@b.c" and claims["tv"] == 3 and "exp" in claims and "iat" in claims
 
 
@@ -264,7 +264,7 @@ def test_logging_out_everywhere_ends_every_session(client, db):
 
 def test_tokens_from_before_versions_existed_keep_working_until_revoked(client, db):
     u = make_user(db, "alice@example.com")
-    legacy = jose_jwt.encode({"sub": "alice@example.com", "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+    legacy = pyjwt.encode({"sub": "alice@example.com", "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
                              settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     h = {"Authorization": f"Bearer {legacy}"}
     assert client.get(f"{BASE}/auth/me", headers=h).status_code == 200
@@ -275,11 +275,11 @@ def test_tokens_from_before_versions_existed_keep_working_until_revoked(client, 
 
 def test_a_token_without_an_expiry_or_subject_is_refused(client, db):
     make_user(db, "alice@example.com")
-    no_exp = jose_jwt.encode({"sub": "alice@example.com"}, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    no_sub = jose_jwt.encode({"exp": datetime.now(timezone.utc) + timedelta(hours=1)}, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    expired = jose_jwt.encode({"sub": "alice@example.com", "exp": datetime.now(timezone.utc) - timedelta(seconds=5)},
+    no_exp = pyjwt.encode({"sub": "alice@example.com"}, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    no_sub = pyjwt.encode({"exp": datetime.now(timezone.utc) + timedelta(hours=1)}, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    expired = pyjwt.encode({"sub": "alice@example.com", "exp": datetime.now(timezone.utc) - timedelta(seconds=5)},
                               settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    forged = jose_jwt.encode({"sub": "alice@example.com", "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+    forged = pyjwt.encode({"sub": "alice@example.com", "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
                              "some-other-signing-key-entirely-123456", algorithm=settings.ALGORITHM)
     for token in (no_exp, no_sub, expired, forged, "garbage"):
         assert client.get(f"{BASE}/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
