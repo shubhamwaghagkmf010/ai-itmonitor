@@ -1993,7 +1993,7 @@ export default function App() {
                           </td>
                           <td className="px-6 py-3.5">
                             <span className={`px-2.5 py-0.5 rounded text-xs font-semibold ${
-                              m.status === 'HEALTHY' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-red-950 text-red-400 border border-red-800'
+                              m.status === 'HEALTHY' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : m.status === 'WARNING' ? 'bg-amber-950 text-amber-400 border border-amber-800' : 'bg-red-950 text-red-400 border border-red-800'
                             }`}>
                               {m.status}
                             </span>

@@ -38,7 +38,8 @@ async def _schedule_retention():
     async def loop():
         while True:
             try:
-                purge_old_data()
+                # Deleting rows is blocking database work: on a thread, so requests keep being served.
+                await asyncio.to_thread(purge_old_data)
             except Exception as exc:
                 print("[retention] error:", exc)
             await asyncio.sleep(24 * 3600)

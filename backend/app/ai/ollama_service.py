@@ -4,35 +4,72 @@ from typing import Dict, Any
 from backend.app.core.config import settings
 
 
+def _num(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pct(value):
+    return f"{value:.0f}%" if value is not None else "not reported"
+
+
 def generate_fallback_rca(context: Dict[str, Any]) -> Dict[str, Any]:
-    top_proc = context.get("top_processes", [{}])[0] if context.get("top_processes") else {}
-    proc_name = top_proc.get("name", "unbounded_process")
-    proc_pid = top_proc.get("pid", "9412")
-    proc_cpu = top_proc.get("cpu_percent", 91.2)
+    """Used when the local model is unavailable or gives an unusable answer. Every statement here comes
+    from the telemetry in `context`; nothing is invented. When there is no process data it says so
+    rather than naming a process."""
+    host = context.get("hostname") or "this node"
+    usage = {"CPU": _num(context.get("cpu_percent")), "RAM": _num(context.get("ram_percent")),
+             "Disk": _num(context.get("disk_percent"))}
+    known = {k: v for k, v in usage.items() if v is not None}
+    resource = max(known, key=known.get) if known else None
+    processes = [p for p in (context.get("top_processes") or []) if isinstance(p, dict) and p.get("name")]
+
+    culprit = None
+    if resource in ("CPU", "RAM") and processes:
+        key = "cpu_percent" if resource == "CPU" else "memory_percent"
+        culprit = max(processes, key=lambda p: _num(p.get(key)) or 0.0)
+        if not (_num(culprit.get(key)) or 0) > 0:
+            culprit = None
+
+    facts = [f"Node hostname: {host}",
+             f"CPU load: {_pct(usage['CPU'])}", f"RAM utilization: {_pct(usage['RAM'])}",
+             f"Disk utilization: {_pct(usage['Disk'])}"]
+    evidence = []
+    if culprit:
+        key = "cpu_percent" if resource == "CPU" else "memory_percent"
+        share = _num(culprit.get(key))
+        facts.append(f"Busiest process by {resource}: '{culprit['name']}' (PID {culprit.get('pid', 'unknown')}) at {share:.0f}%")
+        evidence.append(f"Process '{culprit['name']}' accounts for {share:.0f}% of {resource}.")
+        cause = (f"{resource} is the most heavily used resource on {host} ({_pct(usage[resource])}), and the busiest "
+                 f"process is '{culprit['name']}'. It is the most likely contributor, but this is a rule-based summary, "
+                 f"not a diagnosis.")
+        actions = [f"Check what '{culprit['name']}' (PID {culprit.get('pid', 'unknown')}) is doing and whether this load is expected.",
+                   "Restart it only if it is not expected to use this much, and after saving any work it holds.",
+                   "Look at the application's own logs for repeating errors."]
+        confidence = 0.4
+    elif resource:
+        evidence.append(f"{resource} is the highest of the three readings at {_pct(usage[resource])}.")
+        cause = (f"{resource} is the most heavily used resource on {host} ({_pct(usage[resource])}), but no per-process "
+                 f"data was available, so the cause cannot be narrowed down from this report.")
+        actions = {"Disk": ["Find the largest directories and free space; check log and temp folders first."],
+                   }.get(resource, ["Look at the running processes on the node to see what is using it."])
+        confidence = 0.2
+    else:
+        cause = f"No usable telemetry was available for {host}, so no cause can be given."
+        actions = ["Check that the agent on the node is running and reporting."]
+        confidence = 0.1
 
     return {
-        "observed_facts": [
-            f"Node hostname: {context.get('hostname')}",
-            f"Observed CPU load: {context.get('cpu_percent')}%",
-            f"Observed RAM utilization: {context.get('ram_percent')}%",
-            f"Dominant process: '{proc_name}' (PID: {proc_pid}) utilizing {proc_cpu}% CPU"
-        ],
-        "probable_cause": f"Abnormal CPU consumption in process '{proc_name}' causing system performance degradation.",
-        "evidence": [
-            f"Process {proc_name} is utilizing {proc_cpu}% CPU.",
-            "Telemetry values exceed critical alert thresholds."
-        ],
-        "recommended_actions": [
-            f"Inspect execution thread of process '{proc_name}' (PID: {proc_pid}).",
-            f"Restart or terminate PID {proc_pid} if unresponsive.",
-            "Inspect application error logs for recurring runtime exceptions."
-        ],
-        "preventive_actions": [
-            "Set cgroup resource limits for background worker tasks.",
-            "Implement automated log rotation and proactive threshold alerts."
-        ],
-        "confidence_score": 0.90,
-        "model_name": "Deterministic Diagnostic Engine"
+        "observed_facts": facts,
+        "probable_cause": cause,
+        "evidence": evidence or ["No measurement supports a specific cause."],
+        "recommended_actions": actions,
+        "preventive_actions": ["Alert on sustained high usage and review it before it affects users.",
+                               "Keep log rotation and disk clean-up routines in place."],
+        "confidence_score": confidence,
+        "model_name": "Rule-based summary (language model unavailable)",
     }
 
 

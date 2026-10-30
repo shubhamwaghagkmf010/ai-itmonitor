@@ -112,9 +112,23 @@ def scan_network(request: Request, payload: Optional[ScanRequest] = None,
                 existing.last_seen = now
             else:
                 db.add(NetworkDevice(ip_address=d["ip"], mac_address=d["mac"], first_seen=now, last_seen=now, **fields))
+        # Devices inside the range that did not answer this time are offline now (they used to stay "online" for ever).
+        seen = {d["ip"] for d in result["devices"]}
+        try:
+            scanned = set(parse_scan_target(result["subnet"].replace(" - ", "-"), settings.SCAN_MAX_HOSTS,
+                                            settings.SCAN_ALLOW_PUBLIC)[0])
+        except ValueError:
+            scanned = set()
+        gone = 0
+        if scanned:
+            for row in db.query(NetworkDevice).filter(NetworkDevice.ip_address.in_(scanned),
+                                                      NetworkDevice.is_online.is_(True)).all():
+                if row.ip_address not in seen:
+                    row.is_online = False
+                    gone += 1
         db.commit()
         _audit(db, request, current_user.email, "network.scan", result["subnet"], "SUCCESS",
-               {"devices": len(result["devices"])})
+               {"devices": len(result["devices"]), "marked_offline": gone})
         return result
     finally:
         _scan_lock.release()

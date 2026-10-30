@@ -17,6 +17,9 @@ infrastructure.
   fallback when no model is available.
 - **AI operations assistant** — an SRE-style chat that knows your live fleet and recent
   incidents and helps you troubleshoot.
+- **Automatic incidents** — a machine's status follows its readings (healthy / warning at 85% CPU or RAM
+  or 90% disk / critical at 95%), and a limit exceeded in three samples in a row opens one incident per
+  machine and resource (with a cool-down after it is closed), naming the busiest process.
 - **Anomaly detection** — z-score based flagging of CPU/RAM/disk spikes against each machine's
   own history.
 - **Remote operations** — kill a runaway process or run an approved remote action, gated by
@@ -93,6 +96,16 @@ All settings live in `backend/.env` (see `backend/.env.example`).
 
 The file is read from `backend/.env` next to the code, wherever the server is started from, and a warning is
 printed if other users on the machine can read it.
+
+## First administrator
+
+```bash
+ADMIN_PASSWORD='a long passphrase' python scripts/seed_users.py
+```
+
+Creates the administrator (and an operator; `SEED_OPERATOR=0` skips it). Without `ADMIN_PASSWORD` /
+`OPERATOR_PASSWORD` a random one is generated and printed once. There is no built-in default password,
+and each account must choose its own at first login. Existing accounts are never touched.
 
 ## Tests
 

@@ -24,6 +24,8 @@ from backend.app.services.agent_commands import (
     validate_pid, validate_remote_action,
 )
 from backend.app.services import agent_signing
+from backend.app.services.anomaly import classify_status
+from backend.app.services.incident_automation import raise_incidents_for_sample
 from backend.app.ai.ollama_service import analyze_app_health_with_ai
 from backend.app.ai.ollama_service import analyze_slowness_with_ai
 
@@ -204,6 +206,29 @@ def register_agent(payload: RegisterAgentPayload, db: Session = Depends(get_db),
         result["agent_token"] = issued
     return result
 
+# Only the newest extended sample is ever shown, so it is kept in one row per machine and refreshed at
+# most once a minute, instead of adding a large row every ten seconds for ever.
+EXTENDED_MIN_INTERVAL = timedelta(seconds=60)
+
+
+def _store_extended(db: Session, machine_id: int, payload: IngestMetricsPayload, now: datetime) -> None:
+    if not any([payload.services, payload.containers, payload.sensors, payload.disks_smart, payload.gpu]):
+        return
+    latest = (db.query(ExtendedMetric).filter(ExtendedMetric.machine_id == machine_id)
+              .order_by(ExtendedMetric.timestamp.desc(), ExtendedMetric.id.desc()).first())
+    if latest is None:
+        db.add(ExtendedMetric(machine_id=machine_id, services=payload.services, containers=payload.containers,
+                              sensors=payload.sensors, disks_smart=payload.disks_smart, gpu=payload.gpu, timestamp=now))
+        return
+    seen = latest.timestamp
+    if seen is not None and seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    if seen is not None and now - seen < EXTENDED_MIN_INTERVAL:
+        return
+    latest.services, latest.containers, latest.sensors = payload.services, payload.containers, payload.sensors
+    latest.disks_smart, latest.gpu, latest.timestamp = payload.disks_smart, payload.gpu, now
+
+
 @router.post("/metrics", dependencies=[Depends(limit_body(2 * 1024 * 1024))])
 def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db), _agent: bool = Depends(verify_agent_key),
                    tokens=Depends(_token_headers)):
@@ -214,7 +239,9 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
     machine.logged_in_user = payload.logged_in_user or machine.logged_in_user
     if payload.mac_address and not machine.mac_address:
         machine.mac_address = payload.mac_address.upper()
-    machine.status = MachineStatus.HEALTHY
+    # A machine that is reporting is HEALTHY, WARNING or CRITICAL according to what it reports (it used
+    # to be forced to HEALTHY, so a machine at 100% CPU still showed green).
+    machine.status = classify_status(payload.cpu_percent, payload.ram_percent, payload.disk_percent)
     if payload.drives is not None:
         machine.drives = payload.drives
 
@@ -230,25 +257,14 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
         timestamp=now
     )
     db.add(metric)
-    db.commit()
-    db.refresh(metric)
+    db.flush()  # gives the sample its id; everything below is committed in one go at the end
 
-    if any([payload.services, payload.containers, payload.sensors, payload.disks_smart, payload.gpu]):
-        db.add(ExtendedMetric(
-            machine_id=machine.id,
-            services=payload.services,
-            containers=payload.containers,
-            sensors=payload.sensors,
-            disks_smart=payload.disks_smart,
-            gpu=payload.gpu,
-            timestamp=now,
-        ))
-        db.commit()
+    _store_extended(db, machine.id, payload, now)
 
     if payload.top_processes:
-        db.query(ProcessSnapshot).filter(ProcessSnapshot.machine_id == machine.id).delete()
-        for p in payload.top_processes:
-            proc_entry = ProcessSnapshot(
+        db.query(ProcessSnapshot).filter(ProcessSnapshot.machine_id == machine.id).delete(synchronize_session=False)
+        db.add_all([
+            ProcessSnapshot(
                 machine_id=machine.id,
                 metric_id=metric.id,
                 pid=p.pid,
@@ -258,8 +274,16 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
                 status=p.status,
                 timestamp=now
             )
-            db.add(proc_entry)
-        db.commit()
+            for p in payload.top_processes
+        ])
+
+    # Turn a sustained problem into an incident. A bug here must never cost us the telemetry, so it runs
+    # in a savepoint: if it fails, only its own work is undone.
+    try:
+        with db.begin_nested():
+            raise_incidents_for_sample(db, machine, metric, [p.model_dump() for p in payload.top_processes], now)
+    except Exception as exc:
+        print(f"[incidents] could not evaluate sample for {machine.hostname}: {exc}")
 
     # Anything that waited too long is closed instead of being delivered late.
     expire_stale_commands(db, machine.id, now)
