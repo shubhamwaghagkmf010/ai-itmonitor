@@ -117,6 +117,19 @@ def test_an_existing_production_database_is_upgraded_with_its_data_intact(pg):
     assert {r[1] for r in rows.values()} == {"0"}
 
 
+def test_a_legacy_engineer_user_becomes_an_operator_whatever_the_column_type(pg):
+    """The old role enum had ENGINEER; a database made by create_all has a text column that can still hold it."""
+    pg.python("from backend.app.core.database import Base, engine; import backend.app.models; Base.metadata.create_all(bind=engine)")
+    # A database from before token_version existed: take that column away so the insert below looks like old data.
+    pg.sql("alter table machines drop column agent_token_hash; alter table agent_commands drop column expires_at; "
+           "alter table agent_commands drop column requested_by; alter table users drop column token_version")
+    pg.sql("insert into users (email, hashed_password, role, is_active, must_change_password, failed_login_attempts, created_at, permissions) values "
+           "('eng@x.y','h','ENGINEER',true,false,0,now(),null), ('adm@x.y','h','ADMIN',true,false,0,now(),null)")
+    pg.alembic("stamp", LAST_OLD_REVISION)
+    pg.alembic("upgrade", "head")
+    assert pg.sql("select email||'='||role from users order by id") == "eng@x.y=OPERATOR\nadm@x.y=ADMIN"
+
+
 def test_a_fresh_install_that_used_create_all_can_be_stamped_and_upgraded(pg):
     pg.python("from backend.app.core.database import Base, engine; import backend.app.models; Base.metadata.create_all(bind=engine)")
     pg.alembic("stamp", "head")

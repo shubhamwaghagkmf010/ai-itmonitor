@@ -95,8 +95,10 @@ def upgrade() -> None:
     if role is not None and isinstance(role["type"], sa.Enum):  # (Enum is a kind of String, so test for it first)
         op.alter_column("users", "role", existing_type=role["type"], type_=sa.String(50),
                         existing_nullable=False, postgresql_using="role::text")
-        op.execute("UPDATE users SET role = 'OPERATOR' WHERE role = 'ENGINEER'")
         op.execute("DROP TYPE IF EXISTS userrole")
+
+    # ENGINEER no longer exists as a role; its equivalent is OPERATOR. Needed whether or not the column was an enum.
+    op.execute("UPDATE users SET role = 'OPERATOR' WHERE role = 'ENGINEER'")
 
 
 def downgrade() -> None:
