@@ -20,6 +20,11 @@ within a few working days.
 - Agents get a per-agent token when they enrol. Upgrade the whole fleet, then set `REQUIRE_AGENT_TOKEN=true`.
   A reinstalled machine can enrol again once it has been silent for 5 minutes (at once if the old agent
   presents its token); while the agent is live, a second enrolment is refused.
+- Roll out in this order: upgrade the server first (it starts signing commands), then the agents. An agent
+  that has an `AGENT_API_KEY` ignores commands that are not signed, so a new agent with an old server runs
+  nothing. Agents on versions before this change keep working and do not check signatures.
+- Moving the dashboard to another host name: set the new `PUBLIC_HTTPS_BASE_URL`; the signed hint lets
+  agents follow it. Without `AGENT_API_KEY` they only follow the host they already use.
 - Terminate TLS in front of the API and dashboard.
 - Give the database and agent accounts least privilege.
 - Do not expose the API to an untrusted network; it can run remote actions.

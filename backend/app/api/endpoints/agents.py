@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 import os
 import re
 import io
+import hashlib
 import zipfile
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Header, Request
 from fastapi.responses import FileResponse, Response
@@ -18,9 +19,10 @@ from backend.app.core.config import settings
 from backend.app.core.security import secure_equals
 from backend.app.services.agent_commands import (
     CommandRejected, FINAL_STATUSES, MAX_OUTPUT_LENGTH, REENROLL_AFTER, REPORTABLE_STATUSES,
-    expire_stale_commands, expiry_for, hash_agent_token, new_agent_token, token_matches,
+    effective_expiry, expire_stale_commands, expiry_for, hash_agent_token, new_agent_token, token_matches,
     validate_pid, validate_remote_action,
 )
+from backend.app.services import agent_signing
 from backend.app.ai.ollama_service import analyze_app_health_with_ai
 from backend.app.ai.ollama_service import analyze_slowness_with_ai
 
@@ -267,17 +269,22 @@ def ingest_metrics(payload: IngestMetricsPayload, db: Session = Depends(get_db),
 
     cmds = []
     for c in pending:
+        expires = agent_signing.format_expiry(effective_expiry(c))
         cmds.append({
             "command_id": c.id,
             "type": c.command_type,
-            "payload": c.payload_json
+            "payload": c.payload_json,
+            "expires_at": expires,
+            # Lets the agent tell a real instruction from one injected on the way (see agent_signing).
+            "signature": agent_signing.sign_command(machine.agent_id, c.id, c.command_type, c.payload_json, expires),
         })
         c.status = "DISPATCHED"
     db.commit()
 
+    hint = settings.PUBLIC_HTTPS_BASE_URL
     response = {"status": "ingested", "machine_status": machine.status.value,
                 "pending_commands": cmds, "latest_agent_version": _latest_agent_version(),
-                "https_hint": settings.PUBLIC_HTTPS_BASE_URL}
+                "https_hint": hint, "https_hint_sig": agent_signing.sign_hint(hint) if hint else None}
     if issued:
         response["agent_token"] = issued
     return response
@@ -1061,8 +1068,36 @@ def delete_machine(machine_id: int, request: Request, db: Session = Depends(get_
     _audit(db, request, current_user.email, "machine.delete", label, "SUCCESS", {"agent_id": agent_id})
     return {"status": "deleted", "machine_id": machine_id, "hostname": hostname}
 
+def download_access(request: Request, db: Session = Depends(get_db),
+                    x_agent_key: Optional[str] = Header(default=None, alias="X-Agent-Key"),
+                    authorization: Optional[str] = Header(default=None)) -> str:
+    """The agent bundle is allowed for an agent that holds the shared key (self-update) or a signed-in
+    user who may manage agents. It used to be open to anyone who could reach the server."""
+    if settings.AGENT_API_KEY and secure_equals(x_agent_key, settings.AGENT_API_KEY):
+        return "agent"
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() == "bearer" and token:
+        user = get_current_user(token=token, db=db)
+        require_permission("agents.manage")(current_user=user, db=db)
+        return user.email
+    raise HTTPException(status_code=401, detail="Sign in (or present the agent key) to download the agent",
+                        headers={"WWW-Authenticate": "Bearer"})
+
+
+# Local state and secrets that must never travel inside a bundle that is handed to other machines.
+_BUNDLE_EXCLUDED_NAMES = {"agent_config.json", ".env", "id_rsa", "id_ed25519"}
+_BUNDLE_EXCLUDED_SUFFIXES = (".pem", ".key", ".pfx", ".p12", ".pyc")
+
+
+def _bundle_includes(name: str) -> bool:
+    lowered = name.lower()
+    return lowered not in _BUNDLE_EXCLUDED_NAMES and not lowered.endswith(_BUNDLE_EXCLUDED_SUFFIXES) \
+        and not lowered.startswith(".env")
+
+
 @router.get("/download")
-def download_agent(request: Request, os_name: str = Query("linux", alias="os")):
+def download_agent(request: Request, os_name: str = Query("linux", alias="os"),
+                   who: str = Depends(download_access), db: Session = Depends(get_db)):
     if not os.path.isdir(_AGENT_SRC):
         raise HTTPException(status_code=404, detail="Agent source not found on the server.")
     host = request.headers.get("host", "")
@@ -1072,7 +1107,8 @@ def download_agent(request: Request, os_name: str = Query("linux", alias="os")):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for rel, data in _agent_files().items():
-            z.writestr(rel, data)
+            if _bundle_includes(rel.rsplit("/", 1)[-1]):
+                z.writestr(rel, data)
         z.writestr("requirements.txt", "httpx\npsutil\n")
         z.writestr("README.txt", _tpl("README.txt", server_url))
         if target == "windows":
@@ -1082,11 +1118,21 @@ def download_agent(request: Request, os_name: str = Query("linux", alias="os")):
             z.writestr("run.sh", _tpl("run.sh", server_url))
             z.writestr("install-ubuntu.sh", _tpl("install-ubuntu.sh", server_url))
             fname = "ai-itmonitor-agent-linux.zip"
-    return Response(
-        content=buf.getvalue(),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="' + fname + '"'},
-    )
+    content = buf.getvalue()
+    version = _latest_agent_version()
+    headers = {
+        "Content-Disposition": 'attachment; filename="' + fname + '"',
+        "Cache-Control": "no-store",
+        # What an updating agent verifies before it unpacks anything (agent/bundle.py).
+        "X-Bundle-Version": version,
+        "X-Bundle-SHA256": hashlib.sha256(content).hexdigest(),
+    }
+    signature = agent_signing.sign_bundle(target, version, content)
+    if signature:
+        headers["X-Bundle-Signature"] = signature
+    if who != "agent":  # agents fetch this every update; only people are worth an audit line
+        _audit(db, request, who, "agent.download", target, "SUCCESS", {"version": version})
+    return Response(content=content, media_type="application/zip", headers=headers)
 
 
 @router.get("/version")

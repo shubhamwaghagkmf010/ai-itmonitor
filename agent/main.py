@@ -18,6 +18,8 @@ from agent.collectors.metrics import get_system_info, collect_metrics, collect_e
 from agent.collectors.metrics import _not_responding_pids
 from agent.version import AGENT_VERSION
 from agent.collectors.inventory import collect_inventory
+from agent.signing import command_message, hint_message, verify
+from agent.bundle import safe_extract, verify_bundle
 
 CONFIG_FILE = Path(__file__).parent / "agent_config.json"
 SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8000/api/v1/agents")
@@ -40,7 +42,37 @@ def _build_ssl_context():
     return ctx
 
 
-def _migrate_to_https(client, agent_id, config, hint):
+def _host_of(url):
+    from urllib.parse import urlsplit
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _hint_allowed(hint, signature, config):
+    """Whether to follow the server's suggestion to move to `hint`. The hint arrives in a
+    response that may have travelled over plain HTTP, so on its own it proves nothing: a hint to
+    another host is only followed when it carries a valid signature made with the shared key (or
+    the host was explicitly allowed). A hint to the same host is a plain http -> https upgrade,
+    which still has to pass certificate verification."""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(hint)
+    except ValueError:
+        return False
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
+        return False
+    host = parts.hostname.lower()
+    known = {_host_of(SERVER_URL), _host_of(config.get("original_server_url") or "")}
+    known.discard("")
+    allowed = {h.strip().lower() for h in os.getenv("AGENT_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    if host in known or host in allowed:
+        return True
+    return verify(hint_message(hint), signature, AGENT_API_KEY)
+
+
+def _migrate_to_https(client, agent_id, config, hint, signature=None):
     """One-time, verified move from the legacy HTTP endpoint to the HTTPS one the
     server advertises. Only switches after a real request to the hinted URL
     succeeds, and remembers the choice in agent_config.json so it survives
@@ -48,6 +80,9 @@ def _migrate_to_https(client, agent_id, config, hint):
     current SERVER_URL until this returns a new one."""
     global SERVER_URL
     if not hint or hint == SERVER_URL or not hint.startswith("https://"):
+        return
+    if not _hint_allowed(hint, signature, config):
+        print(f"[tls] ignoring HTTPS hint for an unknown host ({_host_of(hint)}): not signed by the server")
         return
     try:
         r = client.get(f"{hint}/version", timeout=10.0)
@@ -157,11 +192,16 @@ def _download_update():
             r = c.get(url, timeout=90.0)
             r.raise_for_status()
             content = r.content
+        # The update is run as the agent's own account (SYSTEM on Windows): check who it came from
+        # before unpacking a single byte of it.
+        ok, reason = verify_bundle(content, r.headers, target, AGENT_VERSION, AGENT_API_KEY, SERVER_URL)
+        if not ok:
+            print(f"[update] refusing the downloaded bundle: {reason}")
+            return False
         if STAGING_DIR.exists():
             shutil.rmtree(STAGING_DIR, ignore_errors=True)
         STAGING_DIR.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(_io.BytesIO(content)) as z:
-            z.extractall(STAGING_DIR)
+        safe_extract(content, STAGING_DIR)
         if not (STAGING_DIR / "agent" / "main.py").exists():
             shutil.rmtree(STAGING_DIR, ignore_errors=True)
             print("[update] staged bundle missing agent/main.py - aborting")
@@ -522,6 +562,17 @@ def _reboot_system():
         return "FAILED", f"{type(e).__name__}: {e}"
 
 
+def _command_is_authentic(agent_id, command):
+    """With a shared key configured, only commands the server signed for THIS agent are run. The
+    response that carries them may have crossed plain HTTP, where anyone on the path could
+    otherwise add a shell command to it."""
+    if not AGENT_API_KEY:
+        return True  # nothing to check against (development without a key)
+    message = command_message(agent_id, command.get("command_id"), command.get("type"),
+                              command.get("payload"), command.get("expires_at") or "")
+    return verify(message, command.get("signature"), AGENT_API_KEY)
+
+
 def handle_commands(client, agent_id, commands):
     """Execute commands the server dispatched (returned in the /metrics response)
     and report each result back to /command-result."""
@@ -529,7 +580,9 @@ def handle_commands(client, agent_id, commands):
         ctype = c.get("type")
         payload = c.get("payload") or {}
         cid = c.get("command_id")
-        if ctype == "EXECUTE_SHELL":
+        if not _command_is_authentic(agent_id, c):
+            status, output = "FAILED", "Rejected: the command is not signed by the server."
+        elif ctype == "EXECUTE_SHELL":
             status, output = _exec_shell(payload.get("command_str"))
         elif ctype == "KILL_PROCESS":
             status, output = _kill_process(payload.get("pid"))
@@ -596,7 +649,7 @@ def run_agent():
                 if pending:
                     handle_commands(client, agent_id, pending)
                 _maybe_update(data.get("latest_agent_version"))
-                _migrate_to_https(client, agent_id, config, data.get("https_hint"))
+                _migrate_to_https(client, agent_id, config, data.get("https_hint"), data.get("https_hint_sig"))
                 
                 print(f"[Telemetry Sent] CPU: {metrics['cpu_percent']}% | RAM: {metrics['ram_percent']}% | Status: {status_ack}")
             except Exception as e:

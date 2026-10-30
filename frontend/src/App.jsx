@@ -2328,7 +2328,7 @@ export default function App() {
               <h2 className="text-lg font-bold text-white flex items-center gap-2"><HardDrive className="w-5 h-5 text-teal-400" /> Machine Inventory</h2>
               <p className="text-xs text-slate-400 mt-1">Detailed hardware and the full installed-software list for each agent, plus a fleet-wide software search.</p>
             </div>
-            <AgentDownload />
+            <AgentDownload token={token} notify={showToast} />
           </div>
 
           {/* global software search */}
@@ -2905,8 +2905,28 @@ function ForcedPasswordChange({ token, onDone }) {
 }
 
 
-function AgentDownload() {
+function AgentDownload({ token, notify }) {
   const [os, setOs] = useState('windows');
+  const [busy, setBusy] = useState(false);
+  // The download needs a signed-in user with the agents.manage permission, so it goes through axios
+  // with the token and is saved from the response (a plain link cannot send the Authorization header).
+  const download = async () => {
+    setBusy(true);
+    try {
+      const res = await axios.get(`${API_BASE}/agents/download?os=${os}`, {
+        headers: { Authorization: `Bearer ${token}` }, responseType: 'blob',
+      });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url; a.download = `ai-itmonitor-agent-${os}.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      notify && notify(e.response?.status === 403 || e.response?.status === 401
+        ? '[!] You need the agents.manage permission to download the agent.'
+        : `[!] Download failed: ${e.message}`);
+    } finally { setBusy(false); }
+  };
   return (
     <div className="flex gap-2 self-start items-center">
       <select value={os} onChange={(e) => setOs(e.target.value)}
@@ -2914,10 +2934,10 @@ function AgentDownload() {
         <option value="windows">Windows</option>
         <option value="linux">Linux</option>
       </select>
-      <a href={`${API_BASE}/agents/download?os=${os}`}
-        className="bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap">
-        <FileDown className="w-4 h-4" /> Download Agent
-      </a>
+      <button onClick={download} disabled={busy}
+        className="bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 whitespace-nowrap disabled:opacity-50">
+        <FileDown className="w-4 h-4" /> {busy ? 'Preparing...' : 'Download Agent'}
+      </button>
     </div>
   );
 }

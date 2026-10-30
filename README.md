@@ -105,6 +105,15 @@ pytest
 - Each enrolled agent also gets its own token (stored hashed). With it, knowing a machine's `agent_id`
   (derived from its hostname and MAC) is not enough to report as it, collect its commands or answer for
   them; a command result is only accepted from the machine the command was queued for.
+- What the server tells an agent to do is signed. Commands, agent updates and the HTTPS address the agent
+  should move to carry an HMAC made with `AGENT_API_KEY`; the agent refuses anything that does not verify, so
+  someone on the network path cannot add a shell command to a response or swap in a different update.
+  Updates must also be newer than the running version, are unpacked only into the agent folder, and never
+  overwrite `agent_config.json`. Without an `AGENT_API_KEY` an agent only updates over verified HTTPS.
+- An agent follows an HTTPS address for the same host it already talks to; a different host needs the
+  server's signature (or `AGENT_ALLOWED_HOSTS=host1,host2` on the agent).
+- Downloading the agent needs a signed-in user with `agents.manage` (or the agent key, used for self-update),
+  is audited, and the bundle never includes `agent_config.json`, `.env` or key files.
 - Remote actions are limited to a fixed list (shell, kill, reboot, diagnose, service control), validated on
   the server, expire after 5 minutes if the machine does not collect them, and can be cancelled.
 - Remote actions, process kills, MAC changes, deleting machines and pushing updates are recorded in the audit
