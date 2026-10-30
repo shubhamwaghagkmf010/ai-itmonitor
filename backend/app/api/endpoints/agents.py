@@ -15,6 +15,7 @@ from backend.app.models.entities import (
 )
 from backend.app.api.deps import get_current_user, require_permission
 from backend.app.core.config import settings
+from backend.app.core.security import secure_equals
 from backend.app.ai.ollama_service import analyze_app_health_with_ai
 from backend.app.ai.ollama_service import analyze_slowness_with_ai
 
@@ -24,7 +25,7 @@ def verify_agent_key(x_agent_key: Optional[str] = Header(default=None, alias="X-
     """Agents must present X-Agent-Key when AGENT_API_KEY is configured. When it is empty,
     enrolment is open (development only)."""
     expected = settings.AGENT_API_KEY
-    if expected and x_agent_key != expected:
+    if expected and not secure_equals(x_agent_key, expected):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing agent key")
     return True
 

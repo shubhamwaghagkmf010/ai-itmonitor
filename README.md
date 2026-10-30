@@ -50,7 +50,8 @@ infrastructure.
 ```bash
 git clone <your-repo-url> ai-itmonitor
 cd ai-itmonitor
-cp backend/.env.example backend/.env      # set SECRET_KEY, DB and AGENT_API_KEY
+python3 scripts/init_env.py --with-agent-key   # creates backend/.env (mode 600) with a real SECRET_KEY and AGENT_API_KEY
+# then set POSTGRES_PASSWORD in backend/.env, and give every agent the same AGENT_API_KEY
 docker compose up --build
 ```
 
@@ -62,7 +63,7 @@ Dashboard: <http://localhost:5173> · API docs: <http://localhost:8000/docs>
 # Backend (Python 3.12, PostgreSQL and Ollama running)
 python3 -m venv venv && source venv/bin/activate
 pip install -r backend/requirements.txt
-cp backend/.env.example backend/.env       # then edit it
+python3 scripts/init_env.py                # creates backend/.env with a real SECRET_KEY; then edit the rest
 alembic upgrade head
 PYTHONPATH=. uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 
@@ -79,11 +80,22 @@ All settings live in `backend/.env` (see `backend/.env.example`).
 
 | Setting | Purpose |
 | --- | --- |
-| `SECRET_KEY` | JWT signing key. Required for stable sessions; a temporary one is generated if unset. |
-| `POSTGRES_*` | Database connection. |
+| `ENVIRONMENT` | `development` (default) prints warnings about weak settings; `production` refuses to start with them. |
+| `SECRET_KEY` | JWT signing key, at least 32 random characters (`scripts/init_env.py` makes one). A placeholder or short key stops the server from starting; if empty, a temporary key is generated and every session ends on restart. |
+| `POSTGRES_*` | Database connection. A default or well-known password is flagged (an error in production). |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM endpoint and model. |
 | `CORS_ORIGINS` | Allowed browser origins. |
-| `AGENT_API_KEY` | Shared key agents must send to enroll and report. Leave empty only on a trusted network. |
+| `AGENT_API_KEY` | Shared key agents must send to enroll and report. While it is empty anyone who can reach the API can enrol an agent; required in production. |
+
+The file is read from `backend/.env` next to the code, wherever the server is started from, and a warning is
+printed if other users on the machine can read it.
+
+## Tests
+
+```bash
+pip install -r backend/requirements-dev.txt
+pytest
+```
 
 ## Security
 

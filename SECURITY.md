@@ -10,7 +10,13 @@ within a few working days.
 
 ## Deploying safely
 
-- Set a unique `SECRET_KEY` and a non-empty `AGENT_API_KEY`.
+- Run `python scripts/init_env.py --with-agent-key` to create `backend/.env` with a generated
+  `SECRET_KEY` and `AGENT_API_KEY`, and set `ENVIRONMENT=production`. In production the server
+  refuses to start with a placeholder or short `SECRET_KEY`, an empty `AGENT_API_KEY` or a default
+  database password; the signing key is never accepted if it is the placeholder from the example file.
+- Rotate `SECRET_KEY` if it was ever the example value or has been shared: every issued token
+  is invalidated by changing it.
+- Keep `backend/.env` readable by the service account only (`chmod 600`); the server warns otherwise.
 - Terminate TLS in front of the API and dashboard.
 - Give the database and agent accounts least privilege.
 - Do not expose the API to an untrusted network; it can run remote actions.
